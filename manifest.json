@@ -3,11 +3,10 @@
   "name": "LeetTracker Extension",
   "version": "0.1",
   "description": "Companion Chrome extension for LeetTracker, a LeetCode progress tracker.",
-  "permissions": ["scripting", "storage"],
+  "permissions": ["storage"],
   "host_permissions": [
     "https://leetcode.com/*",
-    "https://leet-tracker-log.vercel.app/*",
-    "http://localhost:5173/*"
+    "https://leet-tracker-log.vercel.app/*"
   ],
   "content_scripts": [
     {
@@ -15,10 +14,7 @@
       "js": ["content.js"]
     },
     {
-      "matches": [
-        "https://leet-tracker-log.vercel.app/*",
-        "http://localhost:5173/*"
-      ],
+      "matches": ["https://leet-tracker-log.vercel.app/*"],
       "js": ["inject_webapp.js"],
       "run_at": "document_start"
     }
