@@ -44,7 +44,7 @@ You are responsible for ensuring that any personal exports or usage of problem c
 
 ## Privacy Policy
 
-See the full privacy policy [here](https://github.com/dmiska25/leet-tracker-extension/privacy.html).
+See the full privacy policy [here](https://dmiska25.github.io/leet-tracker-extension/privacy.html).
 
 ## Contact
 
