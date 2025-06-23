@@ -279,7 +279,6 @@
       for (let i = 0; i < subs.length; i++) {
         const sub = subs[i];
         await enrichSubmission(sub, seen, visitLog);
-        chunk.push(sub);
 
         if (chunk.length >= 100) {
           await flushChunk(
@@ -295,6 +294,8 @@
           chunkIdx++;
           await new Promise((r) => setTimeout(r, 20_000));
         }
+
+        chunk.push(sub);
         if (i % 20 === 19) await new Promise((r) => setTimeout(r, 10_000));
       }
 
