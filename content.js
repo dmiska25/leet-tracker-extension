@@ -11,6 +11,8 @@
     `leettracker_seen_problems_${username}`;
   const getChunkKey = (username, index) =>
     `leettracker_leetcode_chunk_${username}_${index}`;
+  const getSnapshotsKey = (username, problemSlug) => 
+    `leettracker_snapshots_${username}_${problemSlug}`;
 
   async function fetchAllSubmissions(lastTimestamp) {
     const submissions = [];
@@ -350,6 +352,149 @@
     await saveToStorage(key, trimmed);
   }
 
+  // Code snapshot functionality
+  function getCurrentCode() {
+    // Try Monaco Editor first (most common on LeetCode)
+    if (window.monaco && window.monaco.editor) {
+      const editors = window.monaco.editor.getModels();
+      if (editors.length > 0) {
+        return editors[0].getValue();
+      }
+    }
+    
+    // Fallback selectors for different LeetCode layouts
+    const selectors = [
+      '.monaco-editor .view-lines',
+      'textarea[data-testid="code-area"]', 
+      '.CodeMirror-code',
+      '[role="textbox"]'
+    ];
+    
+    for (const selector of selectors) {
+      const element = document.querySelector(selector);
+      if (element) {
+        return element.innerText || element.value || element.textContent;
+      }
+    }
+    
+    return null;
+  }
+
+  function shouldTakeSnapshot(oldCode, newCode) {
+    if (!oldCode || !newCode) return true;
+    
+    const diffs = window.Diff.diffChars(oldCode, newCode);
+    const changes = diffs.filter(part => part.added || part.removed);
+    
+    let charChanges = 0;
+    let lineChanges = 0;
+    
+    changes.forEach(part => {
+      charChanges += part.value.length;
+      lineChanges += (part.value.match(/\n/g) || []).length;
+    });
+    
+    return charChanges >= 30 || lineChanges >= 2;
+  }
+
+  async function takeCodeSnapshot(username, problemSlug) {
+    const currentCode = getCurrentCode();
+    if (!currentCode) return;
+    
+    const key = getSnapshotsKey(username, problemSlug);
+    const snapshots = await getFromStorage(key, []);
+    
+    const lastCode = snapshots.length > 0 ? 
+      (snapshots[snapshots.length - 1].fullCode || reconstructCodeFromSnapshots(snapshots)) : 
+      '';
+    
+    if (!shouldTakeSnapshot(lastCode, currentCode)) return;
+    
+    if (typeof window.Diff === 'undefined' || !window.Diff.createPatch) {
+      console.error('[LeetTracker] window.Diff.createPatch not available');
+      return; // Skip snapshot creation
+    }
+    
+    const patch = window.Diff.createPatch('code', lastCode, currentCode, '', '');
+    
+    const snapshot = {
+      timestamp: Date.now(),
+      patch: patch
+    };
+    
+    // Only store fullCode for the first snapshot or every 10th snapshot for recovery
+    if (snapshots.length === 0 || snapshots.length % 10 === 0) {
+      snapshot.fullCode = currentCode;
+    }
+    
+    snapshots.push(snapshot);
+    
+    try {
+      // Check approximate storage size before saving
+      const dataSize = JSON.stringify(snapshots).length;
+      if (dataSize > 1000000) { // ~1MB limit per problem
+        console.warn(`[LeetTracker] Snapshot data too large (${Math.round(dataSize/1024)}KB), reducing...`);
+        snapshots.splice(0, 10); // Remove 10 oldest snapshots
+      }
+      
+      await saveToStorage(key, snapshots);
+      console.log(`[LeetTracker] Code snapshot taken for ${problemSlug} (${snapshots.length} total)`);
+    } catch (error) {
+      console.error(`[LeetTracker] Failed to save snapshot:`, error);
+      // Try to save with fewer snapshots
+      if (snapshots.length > 10) {
+        snapshots.splice(0, snapshots.length - 10);
+        try {
+          await saveToStorage(key, snapshots);
+          console.log(`[LeetTracker] Saved reduced snapshot set for ${problemSlug}`);
+        } catch (retryError) {
+          console.error(`[LeetTracker] Failed to save even reduced snapshots:`, retryError);
+        }
+      }
+    }
+  }
+
+  // Utility function to reconstruct full code from snapshots
+  function reconstructCodeFromSnapshots(snapshots, targetIndex = -1) {
+    if (snapshots.length === 0) return '';
+    if (targetIndex === -1) targetIndex = snapshots.length - 1;
+    if (targetIndex >= snapshots.length) return '';
+    
+    // Find the most recent snapshot with fullCode
+    let baseIndex = targetIndex;
+    while (baseIndex >= 0 && !snapshots[baseIndex].fullCode) {
+      baseIndex--;
+    }
+    
+    if (baseIndex < 0) {
+      console.error('[LeetTracker] No base fullCode found in snapshots');
+      return '';
+    }
+    
+    let code = snapshots[baseIndex].fullCode;
+    
+    // Apply patches from base to target
+    for (let i = baseIndex + 1; i <= targetIndex; i++) {
+      try {
+        code = window.Diff.applyPatch(code, snapshots[i].patch) || code;
+      } catch (error) {
+        console.error(`[LeetTracker] Failed to apply patch ${i}:`, error);
+        break;
+      }
+    }
+    
+    return code;
+  }
+
+  function startCodeSnapshotWatcher(username) {
+    setInterval(() => {
+      const match = window.location.pathname.match(/^\/problems\/([^\/]+)\/?/);
+      if (match) {
+        takeCodeSnapshot(username, match[1]);
+      }
+    }, 3000); // Check every 3 seconds
+  }
+
   function startProblemNavigationWatcher(username) {
     let lastSlug = null;
 
@@ -387,6 +532,7 @@
         }
       }, 5000); // 5 s poll
       startProblemNavigationWatcher(username);
+      startCodeSnapshotWatcher(username);
 
       return true;
     } else {
