@@ -41,7 +41,22 @@
       try {
         const chunkKey = `leettracker_leetcode_chunk_${username}_${index}`;
         const result = await chrome.storage.local.get([chunkKey]);
-        const data = result[chunkKey] || [];
+        const baseData = result[chunkKey] || [];
+        
+        // Enhance with recent code journeys
+        const recentJourneysKey = `leettracker_recent_journeys_${username}`;
+        const recentJourneysResult = await chrome.storage.local.get([recentJourneysKey]);
+        const recentJourneys = recentJourneysResult[recentJourneysKey] || [];
+        
+        // Enhance submissions with detailed journey data if available
+        const enhancedData = baseData.map(submission => {
+          const journey = recentJourneys.find(j => j.submissionId === submission.id);
+          if (journey && journey.codingJourney) {
+            // Replace reference with full journey data
+            submission.codingJourney = journey.codingJourney;
+          }
+          return submission;
+        });
 
         window.postMessage(
           {
@@ -49,11 +64,11 @@
             type: "response_chunk",
             username,
             index,
-            data,
+            data: enhancedData,
           },
           "*"
         );
-        console.log(`[LeetTracker Inject] Chunk ${index} for ${username} sent`);
+        console.log(`[LeetTracker Inject] Enhanced chunk ${index} for ${username} sent (${enhancedData.length} submissions, ${recentJourneys.length} recent journeys)`);
       } catch (e) {
         console.error(
           `[LeetTracker Inject] Failed to get chunk ${index} for ${username}:`,

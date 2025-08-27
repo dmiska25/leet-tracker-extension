@@ -14,9 +14,171 @@
   const getSnapshotsKey = (username, problemSlug) => 
     `leettracker_snapshots_${username}_${problemSlug}`;
   const getTemplatesKey = (problemSlug) => `leettracker_templates_${problemSlug}`;
+  const getRecentJourneysKey = (username) => `leettracker_recent_journeys_${username}`;
 
-  // Fresh start detection functions with template caching
+  // IndexedDB wrapper for larger data storage
+  class LeetTrackerDB {
+    constructor() {
+      this.db = null;
+      this.initPromise = this.init();
+    }
+
+    async init() {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open('LeetTrackerDB', 1);
+        
+        request.onerror = () => {
+          console.error('[LeetTracker] IndexedDB init failed:', request.error);
+          reject(request.error);
+        };
+        
+        request.onsuccess = () => {
+          this.db = request.result;
+          console.log('[LeetTracker] IndexedDB initialized successfully');
+          resolve();
+        };
+        
+        request.onupgradeneeded = (event) => {
+          const db = event.target.result;
+          
+          // Templates store
+          if (!db.objectStoreNames.contains('templates')) {
+            const templateStore = db.createObjectStore('templates', { keyPath: 'problemSlug' });
+            templateStore.createIndex('timestamp', 'timestamp');
+          }
+          
+          // Active snapshots store
+          if (!db.objectStoreNames.contains('snapshots')) {
+            const snapshotStore = db.createObjectStore('snapshots', { keyPath: 'id' });
+            snapshotStore.createIndex('username', 'username');
+            snapshotStore.createIndex('problemSlug', 'problemSlug');
+          }
+          
+          // Journey archive store - permanent backup of all coding journeys
+          if (!db.objectStoreNames.contains('journeys')) {
+            const journeyStore = db.createObjectStore('journeys', { keyPath: 'id' });
+            journeyStore.createIndex('username', 'username');
+            journeyStore.createIndex('titleSlug', 'titleSlug');
+            journeyStore.createIndex('timestamp', 'timestamp');
+            journeyStore.createIndex('archivedAt', 'archivedAt');
+          }
+        };
+      });
+    }
+
+    async storeTemplates(problemSlug, templates) {
+      await this.initPromise;
+      
+      return new Promise((resolve, reject) => {
+        const transaction = this.db.transaction(['templates'], 'readwrite');
+        const store = transaction.objectStore('templates');
+        
+        const data = {
+          problemSlug,
+          templates,
+          timestamp: Date.now()
+        };
+        
+        const request = store.put(data);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    async getTemplates(problemSlug) {
+      await this.initPromise;
+      
+      return new Promise((resolve, reject) => {
+        const transaction = this.db.transaction(['templates'], 'readonly');
+        const store = transaction.objectStore('templates');
+        
+        const request = store.get(problemSlug);
+        request.onsuccess = () => {
+          const result = request.result;
+          if (result && Date.now() - result.timestamp < 86400000) { // 24 hours
+            resolve(result.templates);
+          } else {
+            resolve(null); // Expired or not found
+          }
+        };
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    async storeSnapshots(username, problemSlug, snapshots) {
+      await this.initPromise;
+      
+      return new Promise((resolve, reject) => {
+        const transaction = this.db.transaction(['snapshots'], 'readwrite');
+        const store = transaction.objectStore('snapshots');
+        
+        const data = {
+          id: `${username}_${problemSlug}`,
+          username,
+          problemSlug,
+          snapshots,
+          lastUpdated: Date.now()
+        };
+        
+        const request = store.put(data);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    async getSnapshots(username, problemSlug) {
+      await this.initPromise;
+      
+      return new Promise((resolve, reject) => {
+        const transaction = this.db.transaction(['snapshots'], 'readonly');
+        const store = transaction.objectStore('snapshots');
+        
+        const request = store.get(`${username}_${problemSlug}`);
+        request.onsuccess = () => resolve(request.result?.snapshots || []);
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    async storeJourneyArchive(username, submission) {
+      await this.initPromise;
+      
+      return new Promise((resolve, reject) => {
+        const transaction = this.db.transaction(['journeys'], 'readwrite');
+        const store = transaction.objectStore('journeys');
+        
+        const data = {
+          id: `${username}_${submission.id}`,
+          username,
+          submissionId: submission.id,
+          titleSlug: submission.titleSlug,
+          timestamp: submission.timestamp,
+          codingJourney: submission.codingJourney,
+          archivedAt: Date.now()
+        };
+        
+        const request = store.put(data);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+      });
+    }
+  }
+
+  // Initialize IndexedDB
+  const leetTrackerDB = new LeetTrackerDB();
+
+  // Fresh start detection functions with IndexedDB template caching
   async function cacheTemplatesForProblem(problemSlug) {
+    try {
+      // Try IndexedDB first (larger capacity)
+      const cached = await leetTrackerDB.getTemplates(problemSlug);
+      if (cached) {
+        return cached;
+      }
+    } catch (error) {
+      console.warn('[LeetTracker] IndexedDB read failed, trying chrome.storage fallback:', error);
+    }
+    
+    // Fallback to chrome.storage
     const templatesKey = getTemplatesKey(problemSlug);
     const cached = await getFromStorage(templatesKey, null);
     
@@ -29,11 +191,18 @@
       const templates = await fetchProblemCodeTemplate(problemSlug);
       
       if (templates.length > 0) {
-        await saveToStorage(templatesKey, {
-          templates: templates,
-          timestamp: Date.now(),
-          problemSlug: problemSlug
-        });
+        // Try to store in IndexedDB first
+        try {
+          await leetTrackerDB.storeTemplates(problemSlug, templates);
+        } catch (indexError) {
+          console.warn('[LeetTracker] IndexedDB store failed, using chrome.storage fallback:', indexError);
+          // Fallback to chrome.storage
+          await saveToStorage(templatesKey, {
+            templates: templates,
+            timestamp: Date.now(),
+            problemSlug: problemSlug
+          });
+        }
       }
       
       return templates;
@@ -75,31 +244,36 @@
     }
   }
 
-  // New fast reset logic
   // New fast reset logic - runs independently every 0.5 seconds
   async function handleFreshStartReset(username, problemSlug, currentCode) {
-    const key = getSnapshotsKey(username, problemSlug);
-    const snapshots = await getFromStorage(key, []);
+    // Get snapshots from IndexedDB first, fallback to chrome.storage
+    let snapshots = [];
+    try {
+      snapshots = await leetTrackerDB.getSnapshots(username, problemSlug);
+    } catch (error) {
+      console.warn('[LeetTracker] IndexedDB read failed for reset check, using chrome.storage fallback:', error);
+      const key = getSnapshotsKey(username, problemSlug);
+      snapshots = await getFromStorage(key, []);
+    }
     
     // Only need at least 1 snapshot to consider reset
     if (snapshots.length < 1) return false;
-    
-    // Check if we have any non-template code in history
-    // If all our snapshots contain only template code, don't reset
-    const lastCode = snapshots.length > 0 ? 
-      (snapshots[snapshots.length - 1].fullCode || reconstructCodeFromSnapshots(snapshots)) : 
-      '';
-    
-    // If the last snapshot is also template code, don't reset (avoid continuous reset loop)
-    const lastCodeMatchesTemplate = await checkForFreshStart(lastCode, problemSlug);
-    if (lastCodeMatchesTemplate) return false;
     
     // Fast template check with very strict similarity (near 100%)
     const matchesTemplate = await checkForFreshStart(currentCode, problemSlug);
     
     if (matchesTemplate) {
-      await saveToStorage(key, []); // Clear all snapshots
-      console.log(`[LeetTracker] Fresh start detected for ${problemSlug}, clearing snapshots.`);
+      // Clear snapshots from both IndexedDB and chrome.storage
+      try {
+        await leetTrackerDB.storeSnapshots(username, problemSlug, []);
+      } catch (error) {
+        console.warn('[LeetTracker] IndexedDB clear failed during reset, clearing chrome.storage fallback:', error);
+      }
+      
+      // Also clear chrome.storage fallback
+      const key = getSnapshotsKey(username, problemSlug);
+      await saveToStorage(key, []);
+      
       return true;
     }
     
@@ -454,6 +628,55 @@
       }
     }
     sub.codeDetail = await fetchSubmissionCode(sub.id).catch(() => null);
+    
+    // Capture snapshot history for successful submissions only
+    if (sub.statusDisplay === 'Accepted') {
+      const username = getUsernameFromDOM();
+      if (username) {
+        // Get snapshots from IndexedDB first, fallback to chrome.storage
+        let snapshots = [];
+        try {
+          snapshots = await leetTrackerDB.getSnapshots(username, sub.titleSlug);
+        } catch (error) {
+          console.warn('[LeetTracker] IndexedDB read failed for submission enrichment, using chrome.storage fallback:', error);
+          const snapshotsKey = getSnapshotsKey(username, sub.titleSlug);
+          snapshots = await getFromStorage(snapshotsKey, []);
+        }
+        
+        if (snapshots.length > 0) {
+          // Only include snapshots that occurred before this submission
+          const relevantSnapshots = snapshots.filter(snapshot => 
+            snapshot.timestamp <= sub.timestamp * 1000 // submission timestamp is in seconds, snapshots in ms
+          );
+          
+          if (relevantSnapshots.length > 0) {
+            const codingJourney = {
+              snapshotCount: relevantSnapshots.length,
+              snapshots: relevantSnapshots,
+              totalCodingTime: relevantSnapshots.length > 0 ? 
+                (relevantSnapshots[relevantSnapshots.length - 1].timestamp - relevantSnapshots[0].timestamp) : 0,
+              firstSnapshot: relevantSnapshots[0]?.timestamp,
+              lastSnapshot: relevantSnapshots[relevantSnapshots.length - 1]?.timestamp
+            };
+            
+            // Store in recent journeys (limited to 20 most recent)
+            sub.codingJourney = codingJourney;
+            await storeRecentJourney(username, sub);
+            
+            // Replace the full journey data with a reference for storage efficiency
+            sub.codingJourney = {
+              snapshotCount: relevantSnapshots.length,
+              totalCodingTime: codingJourney.totalCodingTime,
+              firstSnapshot: codingJourney.firstSnapshot,
+              lastSnapshot: codingJourney.lastSnapshot,
+              hasDetailedJourney: true // Flag to indicate journey is available
+            };
+            
+            console.log(`[LeetTracker] Captured ${relevantSnapshots.length} snapshots for submission ${sub.id} (${sub.titleSlug})`);
+          }
+        }
+      }
+    }
   }
 
   async function flushChunk(
@@ -578,6 +801,48 @@
     await saveToStorage(key, trimmed);
   }
 
+  // Recent journeys management for successful submissions
+  async function storeRecentJourney(username, submission) {
+    if (!submission.codingJourney || !submission.codingJourney.snapshots) {
+      return; // No journey data to store
+    }
+    
+    const key = getRecentJourneysKey(username);
+    const recent = await getFromStorage(key, []);
+    
+    // Add new journey to the beginning of the array
+    recent.unshift({
+      submissionId: submission.id,
+      titleSlug: submission.titleSlug,
+      timestamp: submission.timestamp,
+      codingJourney: submission.codingJourney
+    });
+    
+    // Keep only last 20 journeys
+    if (recent.length > 20) {
+      recent.splice(20);
+    }
+    
+    await saveToStorage(key, recent);
+    
+    // ALSO backup to IndexedDB archive (permanent storage)
+    try {
+      await leetTrackerDB.storeJourneyArchive(username, submission);
+      console.log(`[LeetTracker] Archived journey for ${submission.titleSlug} (submission ${submission.id})`);
+    } catch (error) {
+      console.warn('[LeetTracker] Failed to archive journey to IndexedDB:', error);
+    }
+    
+    console.log(`[LeetTracker] Stored recent journey for ${submission.titleSlug} (${recent.length} total recent journeys)`);
+  }
+
+  async function getRecentJourney(username, submissionId) {
+    const key = getRecentJourneysKey(username);
+    const recent = await getFromStorage(key, []);
+    
+    return recent.find(journey => journey.submissionId === submissionId);
+  }
+
   // Code snapshot functionality
   function getCurrentCode() {
     // Try Monaco Editor first (most common on LeetCode)
@@ -627,8 +892,15 @@
     const currentCode = getCurrentCode();
     if (!currentCode) return;
     
-    const key = getSnapshotsKey(username, problemSlug);
-    const snapshots = await getFromStorage(key, []);
+    // Get snapshots from IndexedDB first, fallback to chrome.storage
+    let snapshots = [];
+    try {
+      snapshots = await leetTrackerDB.getSnapshots(username, problemSlug);
+    } catch (error) {
+      console.warn('[LeetTracker] IndexedDB read failed, using chrome.storage fallback:', error);
+      const key = getSnapshotsKey(username, problemSlug);
+      snapshots = await getFromStorage(key, []);
+    }
     
     const lastCode = snapshots.length > 0 ? 
       (snapshots[snapshots.length - 1].fullCode || reconstructCodeFromSnapshots(snapshots)) : 
@@ -656,6 +928,13 @@
     snapshots.push(snapshot);
     
     try {
+      // Try IndexedDB first
+      await leetTrackerDB.storeSnapshots(username, problemSlug, snapshots);
+    } catch (error) {
+      console.warn('[LeetTracker] IndexedDB store failed, using chrome.storage fallback:', error);
+      // Fallback to chrome.storage with size limits
+      const key = getSnapshotsKey(username, problemSlug);
+      
       // Check approximate storage size before saving
       const dataSize = JSON.stringify(snapshots).length;
       if (dataSize > 1000000) { // ~1MB limit per problem
@@ -663,16 +942,18 @@
         snapshots.splice(0, 10); // Remove 10 oldest snapshots
       }
       
-      await saveToStorage(key, snapshots);
-    } catch (error) {
-      console.error(`[LeetTracker] Failed to save snapshot:`, error);
-      // Try to save with fewer snapshots
-      if (snapshots.length > 10) {
-        snapshots.splice(0, snapshots.length - 10);
-        try {
-          await saveToStorage(key, snapshots);
-        } catch (retryError) {
-          console.error(`[LeetTracker] Failed to save even reduced snapshots:`, retryError);
+      try {
+        await saveToStorage(key, snapshots);
+      } catch (storageError) {
+        console.error(`[LeetTracker] Failed to save snapshot:`, storageError);
+        // Try to save with fewer snapshots
+        if (snapshots.length > 10) {
+          snapshots.splice(0, snapshots.length - 10);
+          try {
+            await saveToStorage(key, snapshots);
+          } catch (retryError) {
+            console.error(`[LeetTracker] Failed to save even reduced snapshots:`, retryError);
+          }
         }
       }
     }
