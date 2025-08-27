@@ -1,0 +1,19 @@
+{
+  "name": "leet-tracker-extension",
+  "version": "0.1.1",
+  "description": "Companion Chrome extension for LeetTracker, a LeetCode progress tracker.",
+  "scripts": {
+    "build": "./build.sh dev",
+    "build:zip": "./build.sh dev --zip",
+    "build:prod": "./build.sh prod",
+    "build:prod:zip": "./build.sh prod --zip",
+    "build:prod:version": "./build.sh prod --version-bump --zip",
+    "clean": "rm -rf build && echo 'Build artifacts cleaned'"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dmiska25/leet-tracker-extension.git"
+  },
+  "author": "Dylan Miska",
+  "license": "MIT"
+}

@@ -6,7 +6,8 @@
   "permissions": ["storage"],
   "host_permissions": [
     "https://leetcode.com/*",
-    "https://leet-tracker-log.vercel.app/*"
+    "https://leet-tracker-log.vercel.app/*",
+    "http://localhost:5173/*"
   ],
   "content_scripts": [
     {
@@ -14,7 +15,10 @@
       "js": ["content.js"]
     },
     {
-      "matches": ["https://leet-tracker-log.vercel.app/*"],
+      "matches": [
+        "https://leet-tracker-log.vercel.app/*",
+        "http://localhost:5173/"
+      ],
       "js": ["inject_webapp.js"],
       "run_at": "document_start"
     }
