@@ -612,13 +612,19 @@
 
     while (Date.now() - startTime < maxWaitMs) {
       try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+
         const response = await fetch(checkUrl, {
           method: "GET",
           credentials: "include",
           headers: {
             Referer: window.location.href,
           },
+          signal: controller.signal,
         });
+
+        clearTimeout(timeoutId);
 
         if (!response.ok) {
           console.warn(
@@ -769,11 +775,13 @@
         `[LeetTracker] Found ${recentSubmissions.length} recent submissions, verifying processing status...`
       );
 
-      for (const submission of recentSubmissions) {
-        const verification = await verifyRecentSubmissionStatus(submission.id);
+      // Only verify the most recent submission
+      if (recentSubmissions.length > 0) {
+        const mostRecent = recentSubmissions[recentSubmissions.length - 1];
+        const verification = await verifyRecentSubmissionStatus(mostRecent.id);
         if (!verification.verified) {
           console.warn(
-            `[LeetTracker] Could not verify submission ${submission.id}, but proceeding anyway`
+            `[LeetTracker] Could not verify submission ${mostRecent.id}, but proceeding anyway`
           );
         }
       }
