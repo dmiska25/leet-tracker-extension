@@ -105,7 +105,7 @@
       });
     }
 
-    async storeSnapshots(username, problemSlug, snapshots) {
+    async storeSnapshots(username, problemSlug, snapshotData) {
       await this.initPromise;
       
       return new Promise((resolve, reject) => {
@@ -116,7 +116,8 @@
           id: `${username}_${problemSlug}`,
           username,
           problemSlug,
-          snapshots,
+          snapshots: snapshotData.snapshots,
+          lastFinalCode: snapshotData.lastFinalCode,
           lastUpdated: Date.now()
         };
         
@@ -134,7 +135,17 @@
         const store = transaction.objectStore('snapshots');
         
         const request = store.get(`${username}_${problemSlug}`);
-        request.onsuccess = () => resolve(request.result?.snapshots || []);
+        request.onsuccess = () => {
+          const result = request.result;
+          if (result) {
+            resolve({
+              snapshots: result.snapshots || [],
+              lastFinalCode: result.lastFinalCode || null
+            });
+          } else {
+            resolve({ snapshots: [], lastFinalCode: null });
+          }
+        };
         request.onerror = () => reject(request.error);
       });
     }
@@ -165,6 +176,91 @@
 
   // Initialize IndexedDB
   const leetTrackerDB = new LeetTrackerDB();
+
+  // Text normalization utilities for robust diff handling
+  function normalizeText(raw) {
+    if (!raw) return '\n';
+    
+    // Strip common zero-width characters + BOM
+    const ZW = /[\u200B-\u200D\uFEFF]/g;
+    let s = raw.replace(ZW, '');
+
+    // Normalize line endings to LF
+    s = s.replace(/\r\n?/g, '\n');
+
+    // NFC Unicode normalization
+    s = s.normalize('NFC');
+
+    // Ensure trailing newline for stable diffs
+    if (!s.endsWith('\n')) s += '\n';
+
+    return s;
+  }
+
+  function createChecksum(text) {
+    // Simple hash function for checksums (you could use crypto.subtle for SHA-256 in the future)
+    let hash = 0;
+    if (text.length === 0) return hash.toString();
+    for (let i = 0; i < text.length; i++) {
+      const char = text.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32bit integer
+    }
+    return hash.toString();
+  }
+
+  function makePatch(beforeRaw, afterRaw) {
+    const before = normalizeText(beforeRaw);
+    const after = normalizeText(afterRaw);
+
+    if (!window.diff_match_patch) {
+      console.error('[LeetTracker] diff_match_patch not available');
+      return null;
+    }
+
+    const dmp = new window.diff_match_patch();
+    // Optional tuning for fewer tiny edits
+    dmp.Diff_Timeout = 1; // seconds
+    dmp.Patch_DeleteThreshold = 0.5; // be less eager to delete
+
+    const diffs = dmp.diff_main(before, after);
+    dmp.diff_cleanupSemantic(diffs); // human-friendlier chunks
+
+    const patches = dmp.patch_make(before, diffs);
+    const patchText = dmp.patch_toText(patches);
+
+    return {
+      patchText,
+      beforeNorm: before,
+      afterNorm: after,
+      checksumBefore: createChecksum(before),
+      checksumAfter: createChecksum(after)
+    };
+  }
+
+  function applyPatch(baseRaw, patchText, expectedChecksum = null) {
+    const base = normalizeText(baseRaw);
+    
+    // Verify checksum if provided
+    if (expectedChecksum && createChecksum(base) !== expectedChecksum) {
+      console.warn('[LeetTracker] Checksum mismatch detected during patch application');
+    }
+
+    if (!window.diff_match_patch) {
+      console.error('[LeetTracker] diff_match_patch not available');
+      return { text: base, applied: false };
+    }
+
+    const dmp = new window.diff_match_patch();
+    const patches = dmp.patch_fromText(patchText);
+    const [result, results] = dmp.patch_apply(patches, base);
+    
+    return { 
+      text: result, 
+      applied: results.every(r => r), // true if all patches applied successfully
+      partialResults: results
+    };
+  }
 
   // Fresh start detection functions with IndexedDB template caching
   async function cacheTemplatesForProblem(problemSlug) {
@@ -246,14 +342,13 @@
 
   // New fast reset logic - runs independently every 0.5 seconds
   async function handleFreshStartReset(username, problemSlug, currentCode) {
-    // Get snapshots from IndexedDB first, fallback to chrome.storage
+    // Get snapshots from IndexedDB
     let snapshots = [];
     try {
-      snapshots = await leetTrackerDB.getSnapshots(username, problemSlug);
+      const snapshotData = await leetTrackerDB.getSnapshots(username, problemSlug);
+      snapshots = snapshotData.snapshots || [];
     } catch (error) {
-      console.warn('[LeetTracker] IndexedDB read failed for reset check, using chrome.storage fallback:', error);
-      const key = getSnapshotsKey(username, problemSlug);
-      snapshots = await getFromStorage(key, []);
+      return false; // No fallback - just skip reset check if IndexedDB fails
     }
     
     // Only need at least 1 snapshot to consider reset
@@ -263,18 +358,14 @@
     const matchesTemplate = await checkForFreshStart(currentCode, problemSlug);
     
     if (matchesTemplate) {
-      // Clear snapshots from both IndexedDB and chrome.storage
+      // Clear snapshots from IndexedDB
       try {
-        await leetTrackerDB.storeSnapshots(username, problemSlug, []);
+        await leetTrackerDB.storeSnapshots(username, problemSlug, { snapshots: [], lastFinalCode: null });
+        return true;
       } catch (error) {
-        console.warn('[LeetTracker] IndexedDB clear failed during reset, clearing chrome.storage fallback:', error);
+        console.warn('[LeetTracker] Failed to clear snapshots during reset:', error);
+        return false;
       }
-      
-      // Also clear chrome.storage fallback
-      const key = getSnapshotsKey(username, problemSlug);
-      await saveToStorage(key, []);
-      
-      return true;
     }
     
     return false;
@@ -287,11 +378,11 @@
       if (!match) return;
       
       const problemSlug = match[1];
-      const currentCode = getCurrentCode();
-      if (!currentCode) return;
+      const codeResult = await getCurrentCode();
+      if (!codeResult || !codeResult.bestGuess) return;
       
       // Check for fresh start reset independently
-      await handleFreshStartReset(username, problemSlug, currentCode);
+      await handleFreshStartReset(username, problemSlug, codeResult.bestGuess);
     }, 500); // Check every 0.5 seconds
   }
 
@@ -352,18 +443,20 @@
     }
     
     // Method 2: Fallback to pattern matching on code
-    const patterns = [
-      { pattern: /def\s+\w+.*:/, lang: 'python3', name: 'Python def (defaulting to python3)' },
-      { pattern: /class.*public/, lang: 'java', name: 'Java class' },
-      { pattern: /#include|int main/, lang: 'cpp', name: 'C/C++' },
-      { pattern: /function|\s*=>\s*/, lang: 'javascript', name: 'JavaScript' },
-      { pattern: /fn\s+\w+.*->/, lang: 'rust', name: 'Rust fn' },
-      { pattern: /func\s+\w+.*{/, lang: 'golang', name: 'Go func' }
-    ];
-    
-    for (const {pattern, lang, name} of patterns) {
-      if (pattern.test(code)) {
-        return lang;
+    if (code && typeof code === 'string') {
+      const patterns = [
+        { pattern: /def\s+\w+.*:/, lang: 'python3', name: 'Python def (defaulting to python3)' },
+        { pattern: /class.*public/, lang: 'java', name: 'Java class' },
+        { pattern: /#include|int main/, lang: 'cpp', name: 'C/C++' },
+        { pattern: /function|\s*=>\s*/, lang: 'javascript', name: 'JavaScript' },
+        { pattern: /fn\s+\w+.*->/, lang: 'rust', name: 'Rust fn' },
+        { pattern: /func\s+\w+.*{/, lang: 'golang', name: 'Go func' }
+      ];
+      
+      for (const {pattern, lang, name} of patterns) {
+        if (pattern.test(code)) {
+          return lang;
+        }
       }
     }
     
@@ -371,47 +464,32 @@
     return 'python3';
   }
 
-  function levenshteinDistance(str1, str2) {
-    const matrix = [];
-    for (let i = 0; i <= str2.length; i++) {
-      matrix[i] = [i];
-    }
-    for (let j = 0; j <= str1.length; j++) {
-      matrix[0][j] = j;
-    }
-    for (let i = 1; i <= str2.length; i++) {
-      for (let j = 1; j <= str1.length; j++) {
-        if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
-          matrix[i][j] = matrix[i - 1][j - 1];
-        } else {
-          matrix[i][j] = Math.min(
-            matrix[i - 1][j - 1] + 1,
-            matrix[i][j - 1] + 1,
-            matrix[i - 1][j] + 1
-          );
-        }
-      }
-    }
-    return matrix[str2.length][str1.length];
-  }
-
   function calculateCodeSimilarity(code1, code2) {
-    // Simple similarity calculation
-    const normalize = (code) => code.replace(/\s+/g, ' ').trim().toLowerCase();
-    const norm1 = normalize(code1);
-    const norm2 = normalize(code2);
+    // Normalize both texts for comparison
+    const norm1 = normalizeText(code1);
+    const norm2 = normalizeText(code2);
     
     if (norm1.length === 0 && norm2.length === 0) return 1;
     if (norm1.length === 0 || norm2.length === 0) return 0;
     
-    // Simple Levenshtein-based similarity
-    const longer = norm1.length > norm2.length ? norm1 : norm2;
-    const shorter = norm1.length > norm2.length ? norm2 : norm1;
+    if (!window.diff_match_patch) {
+      // Fallback to simple string comparison if diff-match-patch not available
+      return norm1 === norm2 ? 1 : 0;
+    }
     
-    if (longer.length === 0) return 1;
+    const dmp = new window.diff_match_patch();
+    const diffs = dmp.diff_main(norm1, norm2);
     
-    const distance = levenshteinDistance(longer, shorter);
-    return (longer.length - distance) / longer.length;
+    let totalLength = Math.max(norm1.length, norm2.length);
+    let changedLength = 0;
+    
+    diffs.forEach(([operation, text]) => {
+      if (operation !== 0) { // 0 = EQUAL, 1 = INSERT, -1 = DELETE
+        changedLength += text.length;
+      }
+    });
+    
+    return Math.max(0, (totalLength - changedLength) / totalLength);
   }
 
   async function fetchAllSubmissions(lastTimestamp) {
@@ -615,7 +693,7 @@
     return hits.length ? sub.timestamp - Math.max(...hits) : null;
   }
 
-  async function enrichSubmission(sub, seen, visitLog) {
+  async function enrichSubmission(sub, seen, visitLog, username) {
     sub.solveTime = deriveSolveTime(sub, visitLog);
 
     if (!seen.has(sub.titleSlug)) {
@@ -630,50 +708,47 @@
     sub.codeDetail = await fetchSubmissionCode(sub.id).catch(() => null);
     
     // Capture snapshot history for successful submissions only
-    if (sub.statusDisplay === 'Accepted') {
-      const username = getUsernameFromDOM();
-      if (username) {
-        // Get snapshots from IndexedDB first, fallback to chrome.storage
-        let snapshots = [];
-        try {
-          snapshots = await leetTrackerDB.getSnapshots(username, sub.titleSlug);
-        } catch (error) {
-          console.warn('[LeetTracker] IndexedDB read failed for submission enrichment, using chrome.storage fallback:', error);
-          const snapshotsKey = getSnapshotsKey(username, sub.titleSlug);
-          snapshots = await getFromStorage(snapshotsKey, []);
-        }
+    if (sub.statusDisplay === 'Accepted' && username) {
+      // Get snapshots from IndexedDB
+      let snapshots = [];
+      try {
+        const snapshotData = await leetTrackerDB.getSnapshots(username, sub.titleSlug);
+        snapshots = snapshotData.snapshots || [];
+      } catch (error) {
+        console.warn('[LeetTracker] IndexedDB read failed for submission enrichment, skipping journey capture:', error);
+        return; // No fallback - skip journey capture if IndexedDB fails
+      }
         
-        if (snapshots.length > 0) {
-          // Only include snapshots that occurred before this submission
-          const relevantSnapshots = snapshots.filter(snapshot => 
-            snapshot.timestamp <= sub.timestamp * 1000 // submission timestamp is in seconds, snapshots in ms
-          );
+      if (snapshots.length > 0) {
+        // Only include snapshots that occurred before this submission
+        const relevantSnapshots = snapshots.filter(snapshot => 
+          snapshot.timestamp <= sub.timestamp * 1000 // submission timestamp is in seconds, snapshots in ms
+        );
+        
+        if (relevantSnapshots.length > 0) {
+          const codingJourney = {
+            snapshotCount: relevantSnapshots.length,
+            snapshots: relevantSnapshots,
+            totalCodingTime: relevantSnapshots.length > 0 ? 
+              (relevantSnapshots[relevantSnapshots.length - 1].timestamp - relevantSnapshots[0].timestamp) : 0,
+            firstSnapshot: relevantSnapshots[0]?.timestamp,
+            lastSnapshot: relevantSnapshots[relevantSnapshots.length - 1]?.timestamp
+          };
           
-          if (relevantSnapshots.length > 0) {
-            const codingJourney = {
-              snapshotCount: relevantSnapshots.length,
-              snapshots: relevantSnapshots,
-              totalCodingTime: relevantSnapshots.length > 0 ? 
-                (relevantSnapshots[relevantSnapshots.length - 1].timestamp - relevantSnapshots[0].timestamp) : 0,
-              firstSnapshot: relevantSnapshots[0]?.timestamp,
-              lastSnapshot: relevantSnapshots[relevantSnapshots.length - 1]?.timestamp
-            };
-            
-            // Store in recent journeys (limited to 20 most recent)
-            sub.codingJourney = codingJourney;
-            await storeRecentJourney(username, sub);
-            
-            // Replace the full journey data with a reference for storage efficiency
-            sub.codingJourney = {
-              snapshotCount: relevantSnapshots.length,
-              totalCodingTime: codingJourney.totalCodingTime,
-              firstSnapshot: codingJourney.firstSnapshot,
-              lastSnapshot: codingJourney.lastSnapshot,
-              hasDetailedJourney: true // Flag to indicate journey is available
-            };
-            
-            console.log(`[LeetTracker] Captured ${relevantSnapshots.length} snapshots for submission ${sub.id} (${sub.titleSlug})`);
-          }
+          // Store in recent journeys (limited to 20 most recent)
+          sub.codingJourney = codingJourney;
+          await storeRecentJourney(username, sub);
+          
+          // Replace the full journey data with a reference for storage efficiency
+          sub.codingJourney = {
+            snapshotCount: relevantSnapshots.length,
+            totalCodingTime: codingJourney.totalCodingTime,
+            firstSnapshot: codingJourney.firstSnapshot,
+            lastSnapshot: codingJourney.lastSnapshot,
+            hasDetailedJourney: true // Flag to indicate journey is available
+          };
+          
+          console.log(`[LeetTracker] Captured ${relevantSnapshots.length} snapshots for submission ${sub.id} (${sub.titleSlug})`);
         }
       }
     }
@@ -729,7 +804,7 @@
 
       for (let i = 0; i < subs.length; i++) {
         const sub = subs[i];
-        await enrichSubmission(sub, seen, visitLog);
+        await enrichSubmission(sub, seen, visitLog, username);
 
         if (chunk.length >= 100) {
           await flushChunk(
@@ -843,148 +918,359 @@
     return recent.find(journey => journey.submissionId === submissionId);
   }
 
-  // Code snapshot functionality
-  function getCurrentCode() {
-    // Try Monaco Editor first (most common on LeetCode)
-    if (window.monaco && window.monaco.editor) {
-      const editors = window.monaco.editor.getModels();
-      if (editors.length > 0) {
-        return editors[0].getValue();
+  // Function to explore LeetCode's IndexedDB
+  async function exploreLeetCodeIndexedDB() {
+    try {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open('LeetCode-problems');
+        
+        request.onerror = () => reject(request.error);
+        
+        request.onsuccess = () => {
+          const db = request.result;
+          
+          if (db.objectStoreNames.contains('problem_code')) {
+            const transaction = db.transaction(['problem_code'], 'readonly');
+            const store = transaction.objectStore('problem_code');
+            
+            // Get all keys to find matching patterns
+            const keysRequest = store.getAllKeys();
+            keysRequest.onsuccess = () => {
+              resolve({
+                db,
+                store,
+                keys: keysRequest.result
+              });
+            };
+          } else {
+            resolve({ db, store: null, keys: [] });
+          }
+        };
+      });
+    } catch (error) {
+      return null;
+    }
+  }
+
+  // Function to get current problem ID
+  function getCurrentProblemId() {
+    // Try to extract from URL first
+    const urlMatch = window.location.pathname.match(/^\/problems\/([^\/]+)\/?/);
+    const problemSlug = urlMatch ? urlMatch[1] : null;
+    
+    // Try to find problem ID in script tags
+    let problemId = null;
+    try {
+      const scripts = document.querySelectorAll('script');
+      for (const script of scripts) {
+        if (script.textContent && script.textContent.includes('questionId')) {
+          const match = script.textContent.match(/"questionId":\s*"?(\d+)"?/);
+          if (match) {
+            problemId = match[1];
+            break;
+          }
+        }
+      }
+    } catch (error) {
+      // Continue without problem ID
+    }
+    
+    return {
+      problemSlug,
+      problemId,
+      method: problemId ? 'found' : 'slug-only'
+    };
+  }
+
+  // Function to get code from LeetCode's IndexedDB
+  async function getCodeFromLeetCodeDB(problemId, language = 'python3') {
+    try {
+      const dbInfo = await exploreLeetCodeIndexedDB();
+      if (!dbInfo || !dbInfo.store) {
+        return null;
+      }
+      
+      // Find timestamp keys for this problem and language
+      const timestampKeys = dbInfo.keys.filter(key => {
+        const keyStr = key.toString();
+        return keyStr.startsWith(`${problemId}_`) && 
+               keyStr.includes(`_${language}-updated-time`);
+      });
+      
+      if (timestampKeys.length === 0) {
+        // No timestamp keys found, fall back to direct code key search
+        const codeKeys = dbInfo.keys.filter(key => {
+          const keyStr = key.toString();
+          return keyStr.startsWith(`${problemId}_`) && 
+                 keyStr.includes(`_${language}`) &&
+                 !keyStr.includes('-updated-time');
+        });
+        
+        // Try the first matching code key
+        if (codeKeys.length > 0) {
+          return await getCodeByKey(dbInfo, codeKeys[0]);
+        }
+        return null;
+      }
+      
+      // Find the most recent timestamp
+      let mostRecentTimestamp = 0;
+      let mostRecentKey = null;
+      
+      for (const timestampKey of timestampKeys) {
+        try {
+          const timestamp = await getCodeByKey(dbInfo, timestampKey);
+          if (typeof timestamp === 'number' && timestamp > mostRecentTimestamp) {
+            mostRecentTimestamp = timestamp;
+            // Convert timestamp key to code key by removing '-updated-time'
+            mostRecentKey = timestampKey.toString().replace('-updated-time', '');
+          }
+        } catch (error) {
+          continue; // Skip this timestamp key if we can't read it
+        }
+      }
+      
+      // Get the code using the most recent key
+      if (mostRecentKey) {
+        return await getCodeByKey(dbInfo, mostRecentKey);
+      }
+      
+      return null;
+    } catch (error) {
+      return null;
+    }
+  }
+  
+  // Helper function to get data by key from LeetCode's IndexedDB
+  async function getCodeByKey(dbInfo, key) {
+    return new Promise((resolve, reject) => {
+      const transaction = dbInfo.db.transaction(['problem_code'], 'readonly');
+      const store = transaction.objectStore('problem_code');
+      const request = store.get(key);
+      
+      request.onsuccess = () => {
+        const result = request.result;
+        if (result && typeof result === 'string' && result.length > 0) {
+          resolve(result);
+        } else if (typeof result === 'number') {
+          resolve(result); // For timestamp values
+        } else {
+          resolve(null);
+        }
+      };
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  // Code snapshot functionality - Simple and reliable
+  async function getCurrentCode() {
+    let bestResult = null;
+    let bestMethod = 'none';
+    
+    // Method 1: Try LeetCode's IndexedDB first (most reliable and up-to-date)
+    try {
+      const problemInfo = getCurrentProblemId();
+      
+      if (problemInfo.problemId) {
+        const currentLang = await detectCurrentLanguage('', problemInfo.problemSlug);
+        const leetcodeCode = await getCodeFromLeetCodeDB(problemInfo.problemId, currentLang);
+        
+        if (leetcodeCode) {
+          bestResult = leetcodeCode;
+          bestMethod = 'leetcodeIndexedDB';
+        }
+      }
+    } catch (error) {
+      // Continue to fallback
+    }
+    
+    // Method 2: Fallback to Monaco Editor textarea
+    if (!bestResult) {
+      try {
+        const monacoTextarea = document.querySelector('textarea.inputarea.monaco-mouse-cursor-text');
+        if (monacoTextarea && monacoTextarea.value) {
+          bestResult = monacoTextarea.value;
+          bestMethod = 'monacoTextarea';
+        }
+      } catch (error) {
+        // Continue to next fallback
       }
     }
     
-    // Fallback selectors for different LeetCode layouts
-    const selectors = [
-      '.monaco-editor .view-lines',
-      'textarea[data-testid="code-area"]', 
-      '.CodeMirror-code',
-      '[role="textbox"]'
-    ];
-    
-    for (const selector of selectors) {
-      const element = document.querySelector(selector);
-      if (element) {
-        return element.innerText || element.value || element.textContent;
+    // Method 3: Final fallback - try any textarea with content
+    if (!bestResult) {
+      try {
+        const allTextareas = document.querySelectorAll('textarea');
+        for (const textarea of allTextareas) {
+          if (textarea.value && textarea.value.length > 10) {
+            bestResult = textarea.value;
+            bestMethod = 'textarea_fallback';
+            break;
+          }
+        }
+      } catch (error) {
+        // No fallback available
       }
     }
     
-    return null;
+    return {
+      bestGuess: bestResult,
+      bestMethod: bestMethod,
+      allResults: bestResult ? { [bestMethod]: bestResult } : {}
+    };
   }
 
   function shouldTakeSnapshot(oldCode, newCode) {
     if (!oldCode || !newCode) return true;
     
-    const diffs = window.Diff.diffChars(oldCode, newCode);
-    const changes = diffs.filter(part => part.added || part.removed);
+    // Normalize both texts for comparison
+    const normalizedOld = normalizeText(oldCode);
+    const normalizedNew = normalizeText(newCode);
+    
+    // Use diff-match-patch to calculate changes
+    if (!window.diff_match_patch) {
+      console.error('[LeetTracker] diff_match_patch not available for snapshot decision');
+      return false;
+    }
+    
+    const dmp = new window.diff_match_patch();
+    const diffs = dmp.diff_main(normalizedOld, normalizedNew);
     
     let charChanges = 0;
     let lineChanges = 0;
     
-    changes.forEach(part => {
-      charChanges += part.value.length;
-      lineChanges += (part.value.match(/\n/g) || []).length;
+    diffs.forEach(([operation, text]) => {
+      if (operation !== 0) { // 0 = EQUAL, 1 = INSERT, -1 = DELETE
+        charChanges += text.length;
+        lineChanges += (text.match(/\n/g) || []).length;
+      }
     });
     
     return charChanges >= 30 || lineChanges >= 2;
   }
 
   async function takeCodeSnapshot(username, problemSlug) {
-    const currentCode = getCurrentCode();
-    if (!currentCode) return;
+    const codeResult = await getCurrentCode();
+    if (!codeResult || !codeResult.bestGuess) {
+      console.log('[LeetTracker] No code found to snapshot');
+      return;
+    }
     
-    // Get snapshots from IndexedDB first, fallback to chrome.storage
+    const currentCode = codeResult.bestGuess;
+    
+    // Get snapshots from IndexedDB
     let snapshots = [];
+    let lastFinalCode = '';
     try {
-      snapshots = await leetTrackerDB.getSnapshots(username, problemSlug);
+      const snapshotData = await leetTrackerDB.getSnapshots(username, problemSlug);
+      snapshots = snapshotData.snapshots || [];
+      lastFinalCode = snapshotData.lastFinalCode || '';
     } catch (error) {
-      console.warn('[LeetTracker] IndexedDB read failed, using chrome.storage fallback:', error);
-      const key = getSnapshotsKey(username, problemSlug);
-      snapshots = await getFromStorage(key, []);
+      console.warn('[LeetTracker] IndexedDB read failed, skipping snapshot:', error);
+      return; // No fallback - just skip if IndexedDB fails
     }
     
     const lastCode = snapshots.length > 0 ? 
-      (snapshots[snapshots.length - 1].fullCode || reconstructCodeFromSnapshots(snapshots)) : 
+      (lastFinalCode || 
+       snapshots[snapshots.length - 1].fullCode || 
+       reconstructCodeFromSnapshots(snapshots)) : 
       '';
     
     if (!shouldTakeSnapshot(lastCode, currentCode)) return;
     
-    if (typeof window.Diff === 'undefined' || !window.Diff.createPatch) {
-      console.error('[LeetTracker] window.Diff.createPatch not available');
-      return; // Skip snapshot creation
-    }
-    
-    const patch = window.Diff.createPatch('code', lastCode, currentCode, '', '');
+    // Create patch using diff-match-patch
+    const patchResult = makePatch(lastCode, currentCode);
+    if (!patchResult) return;
     
     const snapshot = {
       timestamp: Date.now(),
-      patch: patch
+      patchText: patchResult.patchText,
+      checksumBefore: patchResult.checksumBefore,
+      checksumAfter: patchResult.checksumAfter,
+      encodingInfo: "utf8 + nfc + lf"
     };
     
-    // Only store fullCode for the first snapshot or every 10th snapshot for recovery
-    if (snapshots.length === 0 || snapshots.length % 10 === 0) {
-      snapshot.fullCode = currentCode;
+    // Store fullCode for checkpoints: first snapshot and every 25th snapshot for recovery
+    const isCheckpoint = snapshots.length === 0 || snapshots.length % 25 === 0;
+    if (isCheckpoint) {
+      snapshot.fullCode = patchResult.afterNorm;
+      snapshot.isCheckpoint = true;
+    }
+    
+    // Simple validation: Test that this single patch can be applied correctly
+    if (snapshots.length > 0) {
+      const testResult = applyPatch(lastCode, patchResult.patchText, patchResult.checksumBefore);
+      if (!testResult.applied || testResult.text !== patchResult.afterNorm) {
+        console.error('[LeetTracker] Patch validation failed, skipping snapshot');
+        return;
+      }
     }
     
     snapshots.push(snapshot);
     
+    console.log(`[LeetTracker] Took snapshot #${snapshots.length} for ${problemSlug} (${currentCode.length} chars) via ${codeResult.bestMethod}`);
+    
+    // Prepare storage data with lastFinalCode
+    const snapshotData = {
+      snapshots: snapshots,
+      lastFinalCode: patchResult.afterNorm,
+      lastUpdated: Date.now()
+    };
+    
     try {
-      // Try IndexedDB first
-      await leetTrackerDB.storeSnapshots(username, problemSlug, snapshots);
+      // Store in IndexedDB only
+      await leetTrackerDB.storeSnapshots(username, problemSlug, snapshotData);
     } catch (error) {
-      console.warn('[LeetTracker] IndexedDB store failed, using chrome.storage fallback:', error);
-      // Fallback to chrome.storage with size limits
-      const key = getSnapshotsKey(username, problemSlug);
-      
-      // Check approximate storage size before saving
-      const dataSize = JSON.stringify(snapshots).length;
-      if (dataSize > 1000000) { // ~1MB limit per problem
-        console.warn(`[LeetTracker] Snapshot data too large (${Math.round(dataSize/1024)}KB), reducing...`);
-        snapshots.splice(0, 10); // Remove 10 oldest snapshots
-      }
-      
-      try {
-        await saveToStorage(key, snapshots);
-      } catch (storageError) {
-        console.error(`[LeetTracker] Failed to save snapshot:`, storageError);
-        // Try to save with fewer snapshots
-        if (snapshots.length > 10) {
-          snapshots.splice(0, snapshots.length - 10);
-          try {
-            await saveToStorage(key, snapshots);
-          } catch (retryError) {
-            console.error(`[LeetTracker] Failed to save even reduced snapshots:`, retryError);
-          }
-        }
-      }
+      console.warn('[LeetTracker] Failed to save snapshot to IndexedDB:', error);
+      // No fallback - if IndexedDB fails, we just lose this snapshot
     }
   }
 
-  // Utility function to reconstruct full code from snapshots
+  // Utility function to reconstruct full code from snapshots using diff-match-patch
   function reconstructCodeFromSnapshots(snapshots, targetIndex = -1) {
     if (snapshots.length === 0) return '';
     if (targetIndex === -1) targetIndex = snapshots.length - 1;
     if (targetIndex >= snapshots.length) return '';
     
-    // Find the most recent snapshot with fullCode
+    // Find the most recent checkpoint at or before the target
     let baseIndex = targetIndex;
     while (baseIndex >= 0 && !snapshots[baseIndex].fullCode) {
       baseIndex--;
     }
     
     if (baseIndex < 0) {
-      console.error('[LeetTracker] No base fullCode found in snapshots');
+      console.error('[LeetTracker] No checkpoint found in snapshots');
       return '';
     }
     
     let code = snapshots[baseIndex].fullCode;
     
-    // Apply patches from base to target
+    // Apply patches from checkpoint to target
     for (let i = baseIndex + 1; i <= targetIndex; i++) {
-      try {
-        code = window.Diff.applyPatch(code, snapshots[i].patch) || code;
-      } catch (error) {
-        console.error(`[LeetTracker] Failed to apply patch ${i}:`, error);
-        break;
+      const snapshot = snapshots[i];
+      
+      if (snapshot.patchText) {
+        // New diff-match-patch format
+        const result = applyPatch(code, snapshot.patchText, snapshot.checksumBefore);
+        if (result.applied) {
+          code = result.text;
+        } else {
+          console.warn(`[LeetTracker] Failed to apply patch ${i}, some hunks may have failed`);
+          // Continue with partial result
+          code = result.text;
+        }
+      } else if (snapshot.patch) {
+        // Legacy format - fallback for old snapshots
+        try {
+          if (window.Diff && window.Diff.applyPatch) {
+            const result = window.Diff.applyPatch(code, snapshot.patch);
+            code = result || code;
+          } else {
+            console.warn(`[LeetTracker] Cannot apply legacy patch ${i}, skipping`);
+          }
+        } catch (error) {
+          console.error(`[LeetTracker] Failed to apply legacy patch ${i}:`, error);
+        }
       }
     }
     
