@@ -42,19 +42,23 @@
         const chunkKey = `leettracker_leetcode_chunk_${username}_${index}`;
         const result = await chrome.storage.local.get([chunkKey]);
         const baseData = result[chunkKey] || [];
-        
+
         // Enhance with recent code journeys
         const recentJourneysKey = `leettracker_recent_journeys_${username}`;
-        const recentJourneysResult = await chrome.storage.local.get([recentJourneysKey]);
+        const recentJourneysResult = await chrome.storage.local.get([
+          recentJourneysKey,
+        ]);
         const recentJourneys = recentJourneysResult[recentJourneysKey] || [];
-        
+
         // Enhance submissions with detailed journey data if available
         const journeysById = new Map(
-          recentJourneys.map(j => [String(j.submissionId), j])
+          recentJourneys.map((j) => [String(j.submissionId), j])
         );
-        const enhancedData = baseData.map(s => {
+        const enhancedData = baseData.map((s) => {
           const j = journeysById.get(String(s.id));
-          return (j && j.codingJourney) ? { ...s, codingJourney: j.codingJourney } : s;
+          return j && j.codingJourney
+            ? { ...s, codingJourney: j.codingJourney }
+            : s;
         });
 
         window.postMessage(
@@ -67,7 +71,9 @@
           },
           "*"
         );
-        console.log(`[LeetTracker Inject] Enhanced chunk ${index} for ${username} sent (${enhancedData.length} submissions, ${recentJourneys.length} recent journeys)`);
+        console.log(
+          `[LeetTracker Inject] Enhanced chunk ${index} for ${username} sent (${enhancedData.length} submissions, ${recentJourneys.length} recent journeys)`
+        );
       } catch (e) {
         console.error(
           `[LeetTracker Inject] Failed to get chunk ${index} for ${username}:`,
