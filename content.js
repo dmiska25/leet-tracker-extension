@@ -21,14 +21,17 @@
 
   async function withSnapshotLock(username, problemSlug, operation) {
     const lockKey = `${username}_${problemSlug}`;
-    // If a prior op exists, wait for it first
+    
+    // Skip if already locked - perfect for scheduled operations
     if (snapshotLocks.has(lockKey)) {
-      try { await snapshotLocks.get(lockKey); } catch { /* swallow */ }
+      return null; // Indicate the operation was skipped
     }
-    // Install a sentinel immediately so concurrent callers wait on it
+    
+    // Install a sentinel immediately so concurrent callers skip
     let release;
     const sentinel = new Promise((resolve) => (release = resolve));
     snapshotLocks.set(lockKey, sentinel);
+    
     try {
       return await operation();
     } finally {
