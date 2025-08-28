@@ -21,25 +21,18 @@
 
   async function withSnapshotLock(username, problemSlug, operation) {
     const lockKey = `${username}_${problemSlug}`;
-    
-    // Wait for any existing operation to complete
+    // If a prior op exists, wait for it first
     if (snapshotLocks.has(lockKey)) {
-      try {
-        await snapshotLocks.get(lockKey);
-      } catch (e) {
-        // Ignore errors from previous operations
-      }
+      try { await snapshotLocks.get(lockKey); } catch { /* swallow */ }
     }
-    
-    // Create new operation promise
-    const operationPromise = operation();
-    snapshotLocks.set(lockKey, operationPromise);
-    
+    // Install a sentinel immediately so concurrent callers wait on it
+    let release;
+    const sentinel = new Promise((resolve) => (release = resolve));
+    snapshotLocks.set(lockKey, sentinel);
     try {
-      const result = await operationPromise;
-      return result;
+      return await operation();
     } finally {
-      // Clean up the lock
+      release();
       snapshotLocks.delete(lockKey);
     }
   }
@@ -978,90 +971,169 @@
     }
   }
 
-  // Function to get current problem ID
-  function getCurrentProblemId() {
-    // Try to extract from URL first
-    const urlMatch = window.location.pathname.match(/^\/problems\/([^\/]+)\/?/);
-    const problemSlug = urlMatch ? urlMatch[1] : null;
+  // Memoized user ID extraction - only scan keys once per session
+  let memoizedUserId = null;
+  async function getMemoizedUserId() {
+    if (memoizedUserId !== null) {
+      return memoizedUserId;
+    }
     
-    // Try to find problem ID in script tags
-    let problemId = null;
     try {
-      const scripts = document.querySelectorAll('script');
+      const dbInfo = await exploreLeetCodeIndexedDB();
+      if (!dbInfo || !dbInfo.keys || dbInfo.keys.length === 0) {
+        return null;
+      }
+      
+      // Extract user ID from any key with pattern: problemId_userId_language
+      for (const key of dbInfo.keys) {
+        const keyStr = key.toString();
+        const match = keyStr.match(/^\d+_(\d+)_\w+/);
+        if (match) {
+          memoizedUserId = match[1];
+          console.log(`[LeetTracker] Memoized user ID: ${memoizedUserId}`);
+          return memoizedUserId;
+        }
+      }
+      
+      return null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  // Persistent mapping of problem slug to problem ID
+  const problemSlugToIdMap = new Map(); // In-memory cache for current session
+  const PROBLEM_ID_STORAGE_KEY = 'leettracker_problem_slug_to_id_map';
+
+  // Function to get current problem slug from URL (fast and reliable)
+  function getCurrentProblemSlug() {
+    const urlMatch = window.location.pathname.match(/^\/problems\/([^\/]+)\/?/);
+    return urlMatch ? urlMatch[1] : null;
+  }
+
+  // Function to get problem ID from slug with persistent caching
+  async function getProblemIdFromSlug(problemSlug) {
+    if (!problemSlug) return null;
+    
+    // Check in-memory cache first
+    if (problemSlugToIdMap.has(problemSlug)) {
+      return problemSlugToIdMap.get(problemSlug);
+    }
+    
+    // Check persistent storage
+    try {
+      const storedMap = await getFromStorage(PROBLEM_ID_STORAGE_KEY, {});
+      if (storedMap[problemSlug]) {
+        // Cache in memory for faster access
+        problemSlugToIdMap.set(problemSlug, storedMap[problemSlug]);
+        return storedMap[problemSlug];
+      }
+    } catch (error) {
+      // Continue to script lookup
+    }
+    
+    // Not found in cache - do expensive script lookup once
+    const problemId = await lookupProblemIdFromScripts();
+    if (problemId) {
+      // Cache both in memory and persistent storage
+      problemSlugToIdMap.set(problemSlug, problemId);
+      
+      try {
+        const storedMap = await getFromStorage(PROBLEM_ID_STORAGE_KEY, {});
+        storedMap[problemSlug] = problemId;
+        await saveToStorage(PROBLEM_ID_STORAGE_KEY, storedMap);
+        console.log(`[LeetTracker] Cached problem ID mapping: ${problemSlug} -> ${problemId}`);
+      } catch (error) {
+        console.warn('[LeetTracker] Failed to persist problem ID mapping:', error);
+      }
+    }
+    
+    return problemId;
+  }
+
+  // Optimized script lookup - only called when not cached
+  async function lookupProblemIdFromScripts() {
+    try {
+      // First try: Look for Next.js data script (most likely location)
+      const nextDataScript = document.querySelector('script#__NEXT_DATA__');
+      if (nextDataScript && nextDataScript.textContent) {
+        const match = nextDataScript.textContent.match(/"questionId":\s*"?(\d+)"?/);
+        if (match) {
+          return match[1];
+        }
+      }
+      
+      // Fallback: Scan other scripts only if needed
+      const scripts = document.querySelectorAll('script:not(#__NEXT_DATA__)');
       for (const script of scripts) {
         if (script.textContent && script.textContent.includes('questionId')) {
           const match = script.textContent.match(/"questionId":\s*"?(\d+)"?/);
           if (match) {
-            problemId = match[1];
-            break;
+            return match[1];
           }
         }
       }
+      
+      return null;
     } catch (error) {
-      // Continue without problem ID
+      return null;
+    }
+  }
+
+  // Function to get current problem ID - now much simpler and faster
+  async function getCurrentProblemId() {
+    const problemSlug = getCurrentProblemSlug();
+    if (!problemSlug) {
+      return {
+        problemSlug: null,
+        problemId: null,
+        method: 'no-slug'
+      };
     }
     
+    const problemId = await getProblemIdFromSlug(problemSlug);
     return {
       problemSlug,
       problemId,
-      method: problemId ? 'found' : 'slug-only'
+      method: problemId ? 'cached' : 'slug-only'
     };
   }
 
   // Function to get code from LeetCode's IndexedDB
   async function getCodeFromLeetCodeDB(problemId, language = 'python3') {
     try {
+      // Get the memoized user ID first
+      const userId = await getMemoizedUserId();
+      if (!userId) {
+        return null;
+      }
+      
       const dbInfo = await exploreLeetCodeIndexedDB();
       if (!dbInfo || !dbInfo.store) {
         return null;
       }
       
-      // Find timestamp keys for this problem and language
-      const timestampKeys = dbInfo.keys.filter(key => {
-        const keyStr = key.toString();
-        return keyStr.startsWith(`${problemId}_`) && 
-               keyStr.includes(`_${language}-updated-time`);
-      });
+      // Construct specific keys using the memoized user ID
+      const timestampKey = `${problemId}_${userId}_${language}-updated-time`;
+      const codeKey = `${problemId}_${userId}_${language}`;
       
-      if (timestampKeys.length === 0) {
-        // No timestamp keys found, fall back to direct code key search
-        const codeKeys = dbInfo.keys.filter(key => {
-          const keyStr = key.toString();
-          return keyStr.startsWith(`${problemId}_`) && 
-                 keyStr.includes(`_${language}`) &&
-                 !keyStr.includes('-updated-time');
-        });
-        
-        // Try the first matching code key
-        if (codeKeys.length > 0) {
-          return await getCodeByKey(dbInfo, codeKeys[0]);
+      // Try to get the timestamp to verify the key exists and is recent
+      try {
+        const timestamp = await getCodeByKey(dbInfo, timestampKey);
+        if (typeof timestamp === 'number') {
+          // Get the actual code using the corresponding code key
+          return await getCodeByKey(dbInfo, codeKey);
         }
+      } catch (error) {
+        // Fall back to direct code key access
+      }
+      
+      // Direct fallback - try the code key without timestamp check
+      try {
+        return await getCodeByKey(dbInfo, codeKey);
+      } catch (error) {
         return null;
       }
-      
-      // Find the most recent timestamp
-      let mostRecentTimestamp = 0;
-      let mostRecentKey = null;
-      
-      for (const timestampKey of timestampKeys) {
-        try {
-          const timestamp = await getCodeByKey(dbInfo, timestampKey);
-          if (typeof timestamp === 'number' && timestamp > mostRecentTimestamp) {
-            mostRecentTimestamp = timestamp;
-            // Convert timestamp key to code key by removing '-updated-time'
-            mostRecentKey = timestampKey.toString().replace('-updated-time', '');
-          }
-        } catch (error) {
-          continue; // Skip this timestamp key if we can't read it
-        }
-      }
-      
-      // Get the code using the most recent key
-      if (mostRecentKey) {
-        return await getCodeByKey(dbInfo, mostRecentKey);
-      }
-      
-      return null;
     } catch (error) {
       return null;
     }
@@ -1095,7 +1167,7 @@
     
     // Method 1: Try LeetCode's IndexedDB first (most reliable and up-to-date)
     try {
-      const problemInfo = getCurrentProblemId();
+      const problemInfo = await getCurrentProblemId();
       
       if (problemInfo.problemId) {
         const currentLang = await detectCurrentLanguage('', problemInfo.problemSlug);
