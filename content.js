@@ -600,6 +600,84 @@
     return Math.max(0, (totalLength - changedLength) / totalLength);
   }
 
+  // Enhanced submission verification for recent submissions
+  async function verifyRecentSubmissionStatus(submissionId, maxWaitMs = 15000) {
+    const checkUrl = `https://leetcode.com/submissions/detail/${submissionId}/check/`;
+    const startTime = Date.now();
+    const pollInterval = 1000;
+
+    console.log(
+      `[LeetTracker] Verifying submission ${submissionId} processing status...`
+    );
+
+    while (Date.now() - startTime < maxWaitMs) {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+        const response = await fetch(checkUrl, {
+          method: "GET",
+          credentials: "include",
+          headers: {
+            Referer: window.location.href,
+          },
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+          console.warn(
+            `[LeetTracker] Check endpoint returned ${response.status} for ${submissionId}, assuming processed`
+          );
+          return { verified: true, state: "ASSUMED_SUCCESS" };
+        }
+
+        const data = await response.json();
+
+        // Still processing
+        if (data.state === "STARTED" || data.state === "PENDING") {
+          console.log(
+            `[LeetTracker] Submission ${submissionId} still processing (${data.state})...`
+          );
+          await new Promise((resolve) => setTimeout(resolve, pollInterval));
+          continue;
+        }
+
+        // Completed (success or failure)
+        if (data.state === "SUCCESS" || data.state === "FAILURE") {
+          console.log(
+            `[LeetTracker] Submission ${submissionId} completed with state: ${data.state}`
+          );
+          return {
+            verified: true,
+            state: data.state,
+            statusMsg: data.status_msg,
+            finished: data.finished,
+          };
+        }
+
+        // Unknown state - assume completed to avoid infinite polling
+        console.warn(
+          `[LeetTracker] Unknown state for ${submissionId}: ${data.state}, assuming completed`
+        );
+        return { verified: true, state: "UNKNOWN" };
+      } catch (error) {
+        console.warn(
+          `[LeetTracker] Error checking submission ${submissionId}:`,
+          error
+        );
+        await new Promise((resolve) => setTimeout(resolve, pollInterval));
+      }
+    }
+
+    // Timeout - assume it's processed
+    console.warn(
+      `[LeetTracker] Timeout verifying submission ${submissionId}, assuming processed`
+    );
+    return { verified: false, state: "TIMEOUT" };
+  }
+
   async function fetchAllSubmissions(lastTimestamp) {
     const submissions = [];
     let offset = 0;
@@ -682,9 +760,34 @@
       offset += limit;
     }
 
-    return Array.from(new Map(submissions.map((s) => [s.id, s])).values()).sort(
-      (a, b) => a.timestamp - b.timestamp
+    const newSubmissions = Array.from(
+      new Map(submissions.map((s) => [s.id, s])).values()
+    ).sort((a, b) => a.timestamp - b.timestamp);
+
+    // Verify recent submissions (submitted within last 60 seconds) are fully processed
+    const now = Math.floor(Date.now() / 1000);
+    const recentSubmissions = newSubmissions.filter(
+      (s) => now - s.timestamp < 60
     );
+
+    if (recentSubmissions.length > 0) {
+      console.log(
+        `[LeetTracker] Found ${recentSubmissions.length} recent submissions, verifying processing status...`
+      );
+
+      // Only verify the most recent submission
+      if (recentSubmissions.length > 0) {
+        const mostRecent = recentSubmissions[recentSubmissions.length - 1];
+        const verification = await verifyRecentSubmissionStatus(mostRecent.id);
+        if (!verification.verified) {
+          console.warn(
+            `[LeetTracker] Could not verify submission ${mostRecent.id}, but proceeding anyway`
+          );
+        }
+      }
+    }
+
+    return newSubmissions;
   }
 
   async function fetchProblemDescription(titleSlug) {
