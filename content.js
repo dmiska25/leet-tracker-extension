@@ -816,7 +816,35 @@
     return json.data?.question?.content || null;
   }
 
-  async function fetchSubmissionCode(submissionId) {
+  async function fetchProblemNote(titleSlug) {
+    const body = {
+      query: `
+        query questionNote($titleSlug: String!) {
+          question(titleSlug: $titleSlug) {
+            questionId
+            note
+          }
+        }
+      `,
+      variables: { titleSlug },
+      operationName: "questionNote",
+    };
+
+    const res = await fetch(GRAPHQL_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Referer: "https://leetcode.com/problemset/all/",
+      },
+      body: JSON.stringify(body),
+      credentials: "include",
+    });
+
+    const json = await res.json();
+    return json.data?.question?.note || null;
+  }
+
+  async function fetchSubmissionDetails(submissionId) {
     const csrfToken = document.cookie
       .split("; ")
       .find((row) => row.startsWith("csrftoken="))
@@ -828,7 +856,20 @@
           submissionDetails(submissionId: $submissionId) {
             code
             runtime
+            runtimeDisplay
+            runtimePercentile
             memory
+            memoryDisplay
+            memoryPercentile
+            totalCorrect
+            totalTestcases
+            lastTestcase
+            codeOutput
+            expectedOutput
+            runtimeError
+            compileError
+            fullCodeOutput
+            notes
           }
         }
       `,
@@ -848,7 +889,30 @@
     });
 
     const json = await res.json();
-    return json.data?.submissionDetails;
+    const submissionDetails = json.data?.submissionDetails;
+
+    if (!submissionDetails) return null;
+
+    return {
+      code: submissionDetails.code,
+      submissionDetails: {
+        runtime: submissionDetails.runtime,
+        memory: submissionDetails.memory,
+        runtimeDisplay: submissionDetails.runtimeDisplay,
+        runtimePercentile: submissionDetails.runtimePercentile,
+        memoryDisplay: submissionDetails.memoryDisplay,
+        memoryPercentile: submissionDetails.memoryPercentile,
+        totalCorrect: submissionDetails.totalCorrect,
+        totalTestcases: submissionDetails.totalTestcases,
+        lastTestcase: submissionDetails.lastTestcase,
+        codeOutput: submissionDetails.codeOutput,
+        expectedOutput: submissionDetails.expectedOutput,
+        runtimeError: submissionDetails.runtimeError,
+        compileError: submissionDetails.compileError,
+        fullCodeOutput: submissionDetails.fullCodeOutput,
+        notes: submissionDetails.notes,
+      },
+    };
   }
 
   function getUsernameFromDOM() {
@@ -907,72 +971,123 @@
   async function enrichSubmission(sub, seen, visitLog, username) {
     sub.solveTime = deriveSolveTime(sub, visitLog);
 
+    // Start all async operations in parallel
+    const operations = [];
+
+    // 1. Problem description (only if not already seen)
     if (!seen.has(sub.titleSlug)) {
-      const desc = await fetchProblemDescription(sub.titleSlug).catch(
-        () => null
+      operations.push(
+        fetchProblemDescription(sub.titleSlug)
+          .then((desc) => ({ type: "description", data: desc }))
+          .catch(() => ({ type: "description", data: null }))
       );
-      if (desc) {
-        sub.problemDescription = desc;
-        seen.add(sub.titleSlug);
-      }
     }
-    sub.codeDetail = await fetchSubmissionCode(sub.id).catch(() => null);
 
-    // Capture snapshot history for successful submissions only
+    // 2. Problem note (try to fetch, but don't fail the whole process)
+    operations.push(
+      fetchProblemNote(sub.titleSlug)
+        .then((note) => ({ type: "note", data: note }))
+        .catch(() => ({ type: "note", data: null }))
+    );
+
+    // 3. Submission details
+    operations.push(
+      fetchSubmissionDetails(sub.id)
+        .then((details) => ({ type: "submissionDetails", data: details }))
+        .catch(() => ({ type: "submissionDetails", data: null }))
+    );
+
+    // 4. Snapshot data (only for successful submissions)
     if (sub.statusDisplay === "Accepted" && username) {
-      // Get snapshots from IndexedDB
-      let snapshots = [];
-      try {
-        const snapshotData = await leetTrackerDB.getSnapshots(
-          username,
-          sub.titleSlug
-        );
-        snapshots = snapshotData.snapshots || [];
-      } catch (error) {
-        console.warn(
-          "[LeetTracker] IndexedDB read failed for submission enrichment, skipping journey capture:",
-          error
-        );
-        return; // No fallback - skip journey capture if IndexedDB fails
-      }
+      operations.push(
+        leetTrackerDB
+          .getSnapshots(username, sub.titleSlug)
+          .then((snapshotData) => ({ type: "snapshots", data: snapshotData }))
+          .catch((error) => {
+            console.warn(
+              "[LeetTracker] IndexedDB read failed for submission enrichment, skipping journey capture:",
+              error
+            );
+            return { type: "snapshots", data: null };
+          })
+      );
+    }
 
-      if (snapshots.length > 0) {
-        // Only include snapshots that occurred before this submission
-        const relevantSnapshots = snapshots.filter(
-          (snapshot) => snapshot.timestamp <= sub.timestamp * 1000 // submission timestamp is in seconds, snapshots in ms
-        );
+    // Wait for all operations to complete
+    const results = await Promise.all(operations);
 
-        if (relevantSnapshots.length > 0) {
-          const codingJourney = {
-            snapshotCount: relevantSnapshots.length,
-            snapshots: relevantSnapshots,
-            totalCodingTime:
-              relevantSnapshots.length > 0
-                ? relevantSnapshots[relevantSnapshots.length - 1].timestamp -
-                  relevantSnapshots[0].timestamp
-                : 0,
-            firstSnapshot: relevantSnapshots[0]?.timestamp,
-            lastSnapshot:
-              relevantSnapshots[relevantSnapshots.length - 1]?.timestamp,
-          };
+    // Process all results
+    for (const result of results) {
+      switch (result.type) {
+        case "description":
+          if (result.data) {
+            sub.problemDescription = result.data;
+            seen.add(sub.titleSlug);
+          }
+          break;
 
-          // Store in recent journeys (limited to 20 most recent)
-          sub.codingJourney = codingJourney;
-          await storeRecentJourney(username, sub);
+        case "note":
+          if (result.data) {
+            sub.problemNote = result.data;
+          }
+          break;
 
-          // Replace the full journey data with a reference for storage efficiency
-          sub.codingJourney = {
-            snapshotCount: relevantSnapshots.length,
-            totalCodingTime: codingJourney.totalCodingTime,
-            firstSnapshot: codingJourney.firstSnapshot,
-            lastSnapshot: codingJourney.lastSnapshot,
-            hasDetailedJourney: true, // Flag to indicate journey is available
-          };
+        case "submissionDetails":
+          if (result.data) {
+            // Keep code at top level for backward compatibility
+            if (result.data.code) {
+              sub.code = result.data.code;
+            }
+            // Add all the enhanced details
+            if (result.data.submissionDetails) {
+              sub.submissionDetails = result.data.submissionDetails;
+            }
+          }
+          break;
 
-          console.log(
-            `[LeetTracker] Captured ${relevantSnapshots.length} snapshots for submission ${sub.id} (${sub.titleSlug})`
-          );
-        }
+        case "snapshots":
+          if (result.data) {
+            const snapshots = result.data.snapshots || [];
+            if (snapshots.length > 0) {
+              // Only include snapshots that occurred before this submission
+              const relevantSnapshots = snapshots.filter(
+                (snapshot) => snapshot.timestamp <= sub.timestamp * 1000 // submission timestamp is in seconds, snapshots in ms
+              );
+
+              if (relevantSnapshots.length > 0) {
+                const codingJourney = {
+                  snapshotCount: relevantSnapshots.length,
+                  snapshots: relevantSnapshots,
+                  totalCodingTime:
+                    relevantSnapshots.length > 0
+                      ? relevantSnapshots[relevantSnapshots.length - 1]
+                          .timestamp - relevantSnapshots[0].timestamp
+                      : 0,
+                  firstSnapshot: relevantSnapshots[0]?.timestamp,
+                  lastSnapshot:
+                    relevantSnapshots[relevantSnapshots.length - 1]?.timestamp,
+                };
+
+                // Store in recent journeys (limited to 20 most recent)
+                sub.codingJourney = codingJourney;
+                await storeRecentJourney(username, sub);
+
+                // Replace the full journey data with a reference for storage efficiency
+                sub.codingJourney = {
+                  snapshotCount: relevantSnapshots.length,
+                  totalCodingTime: codingJourney.totalCodingTime,
+                  firstSnapshot: codingJourney.firstSnapshot,
+                  lastSnapshot: codingJourney.lastSnapshot,
+                  hasDetailedJourney: true, // Flag to indicate journey is available
+                };
+
+                console.log(
+                  `[LeetTracker] Captured ${relevantSnapshots.length} snapshots for submission ${sub.id} (${sub.titleSlug})`
+                );
+              }
+            }
+          }
+          break;
       }
     }
   }
