@@ -24,11 +24,11 @@ else
     cp manifest.dev.json build/src/manifest.json
 fi
 
-# Download diff library if it doesn't exist
+# Download diff-match-patch library if it doesn't exist
 if [ ! -f "build/lib/diff.min.js" ]; then
-    echo "📦 Downloading diff library..."
+    echo "📦 Downloading Google's diff-match-patch library..."
     mkdir -p build/lib
-    curl -o build/lib/diff.min.js https://cdn.jsdelivr.net/npm/diff@5.1.0/dist/diff.min.js
+    curl -o build/lib/diff.min.js https://cdnjs.cloudflare.com/ajax/libs/diff_match_patch/20121119/diff_match_patch.js
 else
     echo "✅ Diff library already exists"
 fi
@@ -36,6 +36,7 @@ fi
 # Combine diff library with content.js to avoid loading issues
 echo "🔗 Combining diff library with content.js..."
 cat build/lib/diff.min.js > build/src/content.js
+echo ";" >> build/src/content.js
 echo "" >> build/src/content.js
 cat content.js >> build/src/content.js
 
