@@ -53,8 +53,26 @@
           reject(request.error);
         };
         
+        request.onblocked = () => {
+          console.error('[LeetTracker] IndexedDB upgrade blocked by another tab/window. Please close other LeetCode tabs and refresh.');
+          reject(new Error('IndexedDB upgrade blocked - close other LeetCode tabs and refresh'));
+        };
+        
         request.onsuccess = () => {
           this.db = request.result;
+          
+          // Handle version change events (when another tab tries to upgrade)
+          this.db.onversionchange = () => {
+            console.warn('[LeetTracker] IndexedDB version change detected. Closing database connection to allow upgrade.');
+            this.db.close();
+            this.db = null;
+            
+            // Optionally dispatch event to notify the page
+            window.dispatchEvent(new CustomEvent('leettracker-db-versionchange', {
+              detail: { message: 'Database version changed, connection closed' }
+            }));
+          };
+          
           console.log('[LeetTracker] IndexedDB initialized successfully');
           resolve();
         };
@@ -87,11 +105,25 @@
       });
     }
 
-    async storeTemplates(problemSlug, templates) {
+    // Helper method to ensure database is available (reinitialize if closed)
+    async ensureDB() {
       await this.initPromise;
       
+      // If the database was closed due to version change, reinitialize
+      if (!this.db) {
+        console.log('[LeetTracker] Database was closed, reinitializing...');
+        this.initPromise = this.init();
+        await this.initPromise;
+      }
+      
+      return this.db;
+    }
+
+    async storeTemplates(problemSlug, templates) {
+      const db = await this.ensureDB();
+      
       return new Promise((resolve, reject) => {
-        const transaction = this.db.transaction(['templates'], 'readwrite');
+        const transaction = db.transaction(['templates'], 'readwrite');
         const store = transaction.objectStore('templates');
         
         const data = {
@@ -107,10 +139,10 @@
     }
 
     async getTemplates(problemSlug) {
-      await this.initPromise;
+      const db = await this.ensureDB();
       
       return new Promise((resolve, reject) => {
-        const transaction = this.db.transaction(['templates'], 'readonly');
+        const transaction = db.transaction(['templates'], 'readonly');
         const store = transaction.objectStore('templates');
         
         const request = store.get(problemSlug);
@@ -127,10 +159,10 @@
     }
 
     async storeSnapshots(username, problemSlug, snapshotData) {
-      await this.initPromise;
+      const db = await this.ensureDB();
       
       return new Promise((resolve, reject) => {
-        const transaction = this.db.transaction(['snapshots'], 'readwrite');
+        const transaction = db.transaction(['snapshots'], 'readwrite');
         const store = transaction.objectStore('snapshots');
         
         const data = {
@@ -149,10 +181,10 @@
     }
 
     async getSnapshots(username, problemSlug) {
-      await this.initPromise;
+      const db = await this.ensureDB();
       
       return new Promise((resolve, reject) => {
-        const transaction = this.db.transaction(['snapshots'], 'readonly');
+        const transaction = db.transaction(['snapshots'], 'readonly');
         const store = transaction.objectStore('snapshots');
         
         const request = store.get(`${username}_${problemSlug}`);
@@ -172,10 +204,10 @@
     }
 
     async storeJourneyArchive(username, submission) {
-      await this.initPromise;
+      const db = await this.ensureDB();
       
       return new Promise((resolve, reject) => {
-        const transaction = this.db.transaction(['journeys'], 'readwrite');
+        const transaction = db.transaction(['journeys'], 'readwrite');
         const store = transaction.objectStore('journeys');
         
         const data = {
