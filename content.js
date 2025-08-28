@@ -16,6 +16,34 @@
   const getTemplatesKey = (problemSlug) => `leettracker_templates_${problemSlug}`;
   const getRecentJourneysKey = (username) => `leettracker_recent_journeys_${username}`;
 
+  // Lock mechanism to prevent concurrent snapshot/reset operations
+  const snapshotLocks = new Map(); // Map of `${username}_${problemSlug}` -> Promise
+
+  async function withSnapshotLock(username, problemSlug, operation) {
+    const lockKey = `${username}_${problemSlug}`;
+    
+    // Wait for any existing operation to complete
+    if (snapshotLocks.has(lockKey)) {
+      try {
+        await snapshotLocks.get(lockKey);
+      } catch (e) {
+        // Ignore errors from previous operations
+      }
+    }
+    
+    // Create new operation promise
+    const operationPromise = operation();
+    snapshotLocks.set(lockKey, operationPromise);
+    
+    try {
+      const result = await operationPromise;
+      return result;
+    } finally {
+      // Clean up the lock
+      snapshotLocks.delete(lockKey);
+    }
+  }
+
   // IndexedDB wrapper for larger data storage
   class LeetTrackerDB {
     constructor() {
@@ -329,10 +357,6 @@
       const similarity = calculateCodeSimilarity(template.code, currentCode);
       const isSimilarToTemplate = similarity >= 0.98; // 98% threshold
       
-      if (isSimilarToTemplate) {
-        return true; // Fresh start detected
-      }
-      
       return isSimilarToTemplate;
     } catch (error) {
       console.error('❌ [Fresh Start] Error during check:', error);
@@ -342,33 +366,35 @@
 
   // New fast reset logic - runs independently every 0.5 seconds
   async function handleFreshStartReset(username, problemSlug, currentCode) {
-    // Get snapshots from IndexedDB
-    let snapshots = [];
-    try {
-      const snapshotData = await leetTrackerDB.getSnapshots(username, problemSlug);
-      snapshots = snapshotData.snapshots || [];
-    } catch (error) {
-      return false; // No fallback - just skip reset check if IndexedDB fails
-    }
-    
-    // Only need at least 1 snapshot to consider reset
-    if (snapshots.length < 1) return false;
-    
-    // Fast template check with very strict similarity (near 100%)
-    const matchesTemplate = await checkForFreshStart(currentCode, problemSlug);
-    
-    if (matchesTemplate) {
-      // Clear snapshots from IndexedDB
+    return await withSnapshotLock(username, problemSlug, async () => {
+      // Get snapshots from IndexedDB
+      let snapshots = [];
       try {
-        await leetTrackerDB.storeSnapshots(username, problemSlug, { snapshots: [], lastFinalCode: null });
-        return true;
+        const snapshotData = await leetTrackerDB.getSnapshots(username, problemSlug);
+        snapshots = snapshotData.snapshots || [];
       } catch (error) {
-        console.warn('[LeetTracker] Failed to clear snapshots during reset:', error);
-        return false;
+        return false; // No fallback - just skip reset check if IndexedDB fails
       }
-    }
-    
-    return false;
+      
+      // Only need at least 1 snapshot to consider reset
+      if (snapshots.length < 1) return false;
+      
+      // Fast template check with very strict similarity (near 100%)
+      const matchesTemplate = await checkForFreshStart(currentCode, problemSlug);
+      
+      if (matchesTemplate) {
+        // Clear snapshots from IndexedDB
+        try {
+          await leetTrackerDB.storeSnapshots(username, problemSlug, { snapshots: [], lastFinalCode: null });
+          return true;
+        } catch (error) {
+          console.warn('[LeetTracker] Failed to clear snapshots during reset:', error);
+          return false;
+        }
+      }
+      
+      return false;
+    });
   }
 
   // Continuous fresh start checker - runs every 0.5 seconds
@@ -1150,80 +1176,82 @@
   }
 
   async function takeCodeSnapshot(username, problemSlug) {
-    const codeResult = await getCurrentCode();
-    if (!codeResult || !codeResult.bestGuess) {
-      console.log('[LeetTracker] No code found to snapshot');
-      return;
-    }
-    
-    const currentCode = codeResult.bestGuess;
-    
-    // Get snapshots from IndexedDB
-    let snapshots = [];
-    let lastFinalCode = '';
-    try {
-      const snapshotData = await leetTrackerDB.getSnapshots(username, problemSlug);
-      snapshots = snapshotData.snapshots || [];
-      lastFinalCode = snapshotData.lastFinalCode || '';
-    } catch (error) {
-      console.warn('[LeetTracker] IndexedDB read failed, skipping snapshot:', error);
-      return; // No fallback - just skip if IndexedDB fails
-    }
-    
-    const lastCode = snapshots.length > 0 ? 
-      (lastFinalCode || 
-       snapshots[snapshots.length - 1].fullCode || 
-       reconstructCodeFromSnapshots(snapshots)) : 
-      '';
-    
-    if (!shouldTakeSnapshot(lastCode, currentCode)) return;
-    
-    // Create patch using diff-match-patch
-    const patchResult = makePatch(lastCode, currentCode);
-    if (!patchResult) return;
-    
-    const snapshot = {
-      timestamp: Date.now(),
-      patchText: patchResult.patchText,
-      checksumBefore: patchResult.checksumBefore,
-      checksumAfter: patchResult.checksumAfter,
-      encodingInfo: "utf8 + nfc + lf"
-    };
-    
-    // Store fullCode for checkpoints: first snapshot and every 25th snapshot for recovery
-    const isCheckpoint = snapshots.length === 0 || snapshots.length % 25 === 0;
-    if (isCheckpoint) {
-      snapshot.fullCode = patchResult.afterNorm;
-      snapshot.isCheckpoint = true;
-    }
-    
-    // Simple validation: Test that this single patch can be applied correctly
-    if (snapshots.length > 0) {
-      const testResult = applyPatch(lastCode, patchResult.patchText, patchResult.checksumBefore);
-      if (!testResult.applied || testResult.text !== patchResult.afterNorm) {
-        console.error('[LeetTracker] Patch validation failed, skipping snapshot');
+    return await withSnapshotLock(username, problemSlug, async () => {
+      const codeResult = await getCurrentCode();
+      if (!codeResult || !codeResult.bestGuess) {
+        console.log('[LeetTracker] No code found to snapshot');
         return;
       }
-    }
-    
-    snapshots.push(snapshot);
-    
-    console.log(`[LeetTracker] Took snapshot #${snapshots.length} for ${problemSlug} (${currentCode.length} chars) via ${codeResult.bestMethod}`);
-    
-    // Prepare storage data with lastFinalCode
-    const snapshotData = {
-      snapshots: snapshots,
-      lastFinalCode: patchResult.afterNorm,
-      lastUpdated: Date.now()
-    };
-    
-    try {
-      // Store in IndexedDB only
-      await leetTrackerDB.storeSnapshots(username, problemSlug, snapshotData);
-    } catch (error) {
-      console.warn('[LeetTracker] Failed to save snapshot to IndexedDB:', error);
-      // No fallback - if IndexedDB fails, we just lose this snapshot
-    }
+      
+      const currentCode = codeResult.bestGuess;
+      
+      // Get snapshots from IndexedDB
+      let snapshots = [];
+      let lastFinalCode = '';
+      try {
+        const snapshotData = await leetTrackerDB.getSnapshots(username, problemSlug);
+        snapshots = snapshotData.snapshots || [];
+        lastFinalCode = snapshotData.lastFinalCode || '';
+      } catch (error) {
+        console.warn('[LeetTracker] IndexedDB read failed, skipping snapshot:', error);
+        return; // No fallback - just skip if IndexedDB fails
+      }
+      
+      const lastCode = snapshots.length > 0 ? 
+        (lastFinalCode || 
+         snapshots[snapshots.length - 1].fullCode || 
+         reconstructCodeFromSnapshots(snapshots)) : 
+        '';
+      
+      if (!shouldTakeSnapshot(lastCode, currentCode)) return;
+      
+      // Create patch using diff-match-patch
+      const patchResult = makePatch(lastCode, currentCode);
+      if (!patchResult) return;
+      
+      const snapshot = {
+        timestamp: Date.now(),
+        patchText: patchResult.patchText,
+        checksumBefore: patchResult.checksumBefore,
+        checksumAfter: patchResult.checksumAfter,
+        encodingInfo: "utf8 + nfc + lf"
+      };
+      
+      // Store fullCode for checkpoints: first snapshot and every 25th snapshot for recovery
+      const isCheckpoint = snapshots.length === 0 || snapshots.length % 25 === 0;
+      if (isCheckpoint) {
+        snapshot.fullCode = patchResult.afterNorm;
+        snapshot.isCheckpoint = true;
+      }
+      
+      // Simple validation: Test that this single patch can be applied correctly
+      if (snapshots.length > 0) {
+        const testResult = applyPatch(lastCode, patchResult.patchText, patchResult.checksumBefore);
+        if (!testResult.applied || testResult.text !== patchResult.afterNorm) {
+          console.error('[LeetTracker] Patch validation failed, skipping snapshot');
+          return;
+        }
+      }
+      
+      snapshots.push(snapshot);
+      
+      console.log(`[LeetTracker] Took snapshot #${snapshots.length} for ${problemSlug} (${currentCode.length} chars) via ${codeResult.bestMethod}`);
+      
+      // Prepare storage data with lastFinalCode
+      const snapshotData = {
+        snapshots: snapshots,
+        lastFinalCode: patchResult.afterNorm,
+        lastUpdated: Date.now()
+      };
+      
+      try {
+        // Store in IndexedDB only
+        await leetTrackerDB.storeSnapshots(username, problemSlug, snapshotData);
+      } catch (error) {
+        console.warn('[LeetTracker] Failed to save snapshot to IndexedDB:', error);
+        // No fallback - if IndexedDB fails, we just lose this snapshot
+      }
+    });
   }
 
   // Utility function to reconstruct full code from snapshots using diff-match-patch
@@ -1278,10 +1306,10 @@
   }
 
   function startCodeSnapshotWatcher(username) {
-    setInterval(() => {
+    setInterval(async () => {
       const match = window.location.pathname.match(/^\/problems\/([^\/]+)\/?/);
       if (match) {
-        takeCodeSnapshot(username, match[1]);
+        await takeCodeSnapshot(username, match[1]);
       }
     }, 3000); // Check every 3 seconds
   }

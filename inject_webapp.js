@@ -49,13 +49,12 @@
         const recentJourneys = recentJourneysResult[recentJourneysKey] || [];
         
         // Enhance submissions with detailed journey data if available
-        const enhancedData = baseData.map(submission => {
-          const journey = recentJourneys.find(j => j.submissionId === submission.id);
-          if (journey && journey.codingJourney) {
-            // Replace reference with full journey data
-            submission.codingJourney = journey.codingJourney;
-          }
-          return submission;
+        const journeysById = new Map(
+          recentJourneys.map(j => [String(j.submissionId), j])
+        );
+        const enhancedData = baseData.map(s => {
+          const j = journeysById.get(String(s.id));
+          return (j && j.codingJourney) ? { ...s, codingJourney: j.codingJourney } : s;
         });
 
         window.postMessage(
