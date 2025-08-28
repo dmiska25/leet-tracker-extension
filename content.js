@@ -285,11 +285,13 @@
 
   // Fresh start detection functions with IndexedDB template caching
   async function cacheTemplatesForProblem(problemSlug) {
+    let idbResult = null;
+    
     try {
       // Try IndexedDB first (larger capacity)
-      const cached = await leetTrackerDB.getTemplates(problemSlug);
-      if (cached) {
-        return cached;
+      idbResult = await leetTrackerDB.getTemplates(problemSlug);
+      if (idbResult) {
+        return idbResult;
       }
     } catch (error) {
       console.warn('[LeetTracker] IndexedDB read failed, trying chrome.storage fallback:', error);
@@ -297,11 +299,11 @@
     
     // Fallback to chrome.storage
     const templatesKey = getTemplatesKey(problemSlug);
-    const cached = await getFromStorage(templatesKey, null);
+    const storageCached = await getFromStorage(templatesKey, null);
     
     // Return cached if it's fresh (less than 1 day old)
-    if (cached && Date.now() - cached.timestamp < 86400000) {
-      return cached.templates;
+    if (storageCached && Date.now() - storageCached.timestamp < 86400000) {
+      return storageCached.templates;
     }
     
     try {
@@ -325,7 +327,7 @@
       return templates;
     } catch (error) {
       console.error('❌ [Template Cache] Failed to fetch templates:', error);
-      return cached?.templates || [];
+      return storageCached?.templates || [];
     }
   }
 
