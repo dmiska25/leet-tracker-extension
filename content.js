@@ -448,6 +448,9 @@
       );
 
       if (matchesTemplate) {
+        // If the template matches but we only have 1 snapshot, we're already done
+        if (snapshots.length == 1) return false;
+
         // Clear snapshots from IndexedDB
         try {
           await leetTrackerDB.storeSnapshots(username, problemSlug, {
