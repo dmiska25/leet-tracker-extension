@@ -820,17 +820,41 @@
       operationName: "questionNote",
     };
 
-    const res = await fetch(GRAPHQL_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Referer: "https://leetcode.com/problemset/all/",
-      },
-      body: JSON.stringify(body),
-      credentials: "include",
-    });
-
-    const json = await res.json();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000); // 8s timeout
+    let res;
+    try {
+      res = await fetch(GRAPHQL_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Referer: "https://leetcode.com/problemset/all/",
+        },
+        body: JSON.stringify(body),
+        credentials: "include",
+        signal: controller.signal,
+      });
+    } catch (error) {
+      clearTimeout(timeout);
+      if (error.name === "AbortError") {
+        console.warn("[LeetTracker] fetchProblemNote timed out");
+      } else {
+        console.warn("[LeetTracker] fetchProblemNote error:", error);
+      }
+      return null;
+    }
+    clearTimeout(timeout);
+    if (!res.ok) {
+      console.warn(`[LeetTracker] fetchProblemNote HTTP error: ${res.status}`);
+      return null;
+    }
+    let json;
+    try {
+      json = await res.json();
+    } catch (error) {
+      console.warn("[LeetTracker] fetchProblemNote invalid JSON:", error);
+      return null;
+    }
     return json.data?.question?.note || null;
   }
 
@@ -1314,27 +1338,38 @@
     }
 
     // Not found in cache - fetch from API
-    const question = await fetchProblemDescription(problemSlug);
-    const problemId = question?.questionId || null;
-    if (problemId) {
-      // Cache both in memory and persistent storage
-      problemSlugToIdMap.set(problemSlug, problemId);
-
-      try {
-        const storedMap = await getFromStorage(PROBLEM_ID_STORAGE_KEY, {});
-        storedMap[problemSlug] = problemId;
-        await saveToStorage(PROBLEM_ID_STORAGE_KEY, storedMap);
-        console.log(
-          `[LeetTracker] Cached problem ID mapping: ${problemSlug} -> ${problemId}`
-        );
-      } catch (error) {
-        console.warn(
-          "[LeetTracker] Failed to persist problem ID mapping:",
-          error
-        );
-      }
+    let question = null;
+    try {
+      question = await fetchProblemDescription(problemSlug);
+    } catch (error) {
+      console.warn(
+        `[LeetTracker] fetchProblemDescription failed for slug '${problemSlug}':`,
+        error
+      );
+      return null;
     }
-
+    if (!question || !question.questionId) {
+      console.warn(
+        `[LeetTracker] No valid question data for slug '${problemSlug}'.`
+      );
+      return null;
+    }
+    const problemId = question.questionId;
+    // Cache both in memory and persistent storage
+    problemSlugToIdMap.set(problemSlug, problemId);
+    try {
+      const storedMap = await getFromStorage(PROBLEM_ID_STORAGE_KEY, {});
+      storedMap[problemSlug] = problemId;
+      await saveToStorage(PROBLEM_ID_STORAGE_KEY, storedMap);
+      console.log(
+        `[LeetTracker] Cached problem ID mapping: ${problemSlug} -> ${problemId}`
+      );
+    } catch (error) {
+      console.warn(
+        "[LeetTracker] Failed to persist problem ID mapping:",
+        error
+      );
+    }
     return problemId;
   }
 
@@ -1743,6 +1778,11 @@
 
   function trySyncIfLoggedIn() {
     const SELECTOR = '[data-e2e-locator="console-submit-button"]';
+
+    // We'll try to get user info first. Eventually we'll just stop.
+    // When a user logs in, currently, leetcode resets the page and
+    // we reload this entire script anyway so we don't need to retry
+    // forever.
     getUserInfoWithCache().then(({ userId, username }) => {
       if (username && userId) {
         console.log(`[LeetTracker] Detected login as ${username}, starting.`);
