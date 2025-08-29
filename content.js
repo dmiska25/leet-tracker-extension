@@ -423,7 +423,7 @@
     }
   }
 
-  // New fast reset logic - runs independently every 0.5 seconds
+  // Fast reset logic - runs independently every 0.5 seconds
   async function handleFreshStartReset(username, problemSlug, currentCode) {
     return await withSnapshotLock(username, problemSlug, async () => {
       // Get snapshots from IndexedDB
@@ -448,6 +448,9 @@
       );
 
       if (matchesTemplate) {
+        // If the template matches but we only have 1 snapshot, we're already done
+        if (snapshots.length == 1) return false;
+
         // Clear snapshots from IndexedDB
         try {
           await leetTrackerDB.storeSnapshots(username, problemSlug, {
@@ -519,52 +522,41 @@
     }
   }
 
+  // Helper: Get selected language for a problem from localStorage
+  function getSelectedLanguageForProblem(problemId, userId) {
+    if (!problemId || !userId) return null;
+    const key = `${problemId}_${userId}_lang`;
+    return localStorage.getItem(key);
+  }
+
   async function detectCurrentLanguage(code, problemSlug = null) {
-    // Method 1: Check localStorage for saved language preference (most reliable)
+    // 1. Try per-problem language from localStorage
+    try {
+      const { userId } = getUserInfoWithCache();
+      const problemId = problemSlug
+        ? await getProblemIdFromSlug(problemSlug)
+        : null;
+      if (problemId && userId) {
+        const lang = getSelectedLanguageForProblem(problemId, userId);
+        if (lang) return lang;
+      }
+    } catch (e) {
+      // continue to fallback
+    }
+
+    // 2. Fallback to global_lang from localStorage
     try {
       const savedLang = localStorage.getItem("global_lang");
       if (savedLang) {
-        // Handle case where localStorage stores JSON string or plain string
         let cleanLang = savedLang;
-
-        // If it starts and ends with quotes, it's a JSON string
         if (savedLang.startsWith('"') && savedLang.endsWith('"')) {
           cleanLang = JSON.parse(savedLang);
         }
-
         const normalizedLang = cleanLang.toLowerCase().trim();
         return normalizedLang;
       }
-    } catch (error) {
-      console.warn(
-        "[LeetTracker] Failed to access localStorage for language detection"
-      );
-    }
-
-    // Method 2: Fallback to pattern matching on code
-    if (code && typeof code === "string") {
-      const patterns = [
-        {
-          pattern: /def\s+\w+.*:/,
-          lang: "python3",
-          name: "Python def (defaulting to python3)",
-        },
-        { pattern: /class.*public/, lang: "java", name: "Java class" },
-        { pattern: /#include|int main/, lang: "cpp", name: "C/C++" },
-        {
-          pattern: /function|\s*=>\s*/,
-          lang: "javascript",
-          name: "JavaScript",
-        },
-        { pattern: /fn\s+\w+.*->/, lang: "rust", name: "Rust fn" },
-        { pattern: /func\s+\w+.*{/, lang: "golang", name: "Go func" },
-      ];
-
-      for (const { pattern, lang, name } of patterns) {
-        if (pattern.test(code)) {
-          return lang;
-        }
-      }
+    } catch (e) {
+      // continue to fallback
     }
 
     // Default fallback
@@ -795,6 +787,7 @@
       query: `
         query getQuestionDetail($titleSlug: String!) {
           question(titleSlug: $titleSlug) {
+            questionId
             content
           }
         }
@@ -813,10 +806,62 @@
     });
 
     const json = await res.json();
-    return json.data?.question?.content || null;
+    return json.data?.question || null;
   }
 
-  async function fetchSubmissionCode(submissionId) {
+  async function fetchProblemNote(titleSlug) {
+    const body = {
+      query: `
+        query questionNote($titleSlug: String!) {
+          question(titleSlug: $titleSlug) {
+            questionId
+            note
+          }
+        }
+      `,
+      variables: { titleSlug },
+      operationName: "questionNote",
+    };
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000); // 8s timeout
+    let res;
+    try {
+      res = await fetch(GRAPHQL_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Referer: "https://leetcode.com/problemset/all/",
+        },
+        body: JSON.stringify(body),
+        credentials: "include",
+        signal: controller.signal,
+      });
+    } catch (error) {
+      clearTimeout(timeout);
+      if (error.name === "AbortError") {
+        console.warn("[LeetTracker] fetchProblemNote timed out");
+      } else {
+        console.warn("[LeetTracker] fetchProblemNote error:", error);
+      }
+      return null;
+    }
+    clearTimeout(timeout);
+    if (!res.ok) {
+      console.warn(`[LeetTracker] fetchProblemNote HTTP error: ${res.status}`);
+      return null;
+    }
+    let json;
+    try {
+      json = await res.json();
+    } catch (error) {
+      console.warn("[LeetTracker] fetchProblemNote invalid JSON:", error);
+      return null;
+    }
+    return json.data?.question?.note || null;
+  }
+
+  async function fetchSubmissionDetails(submissionId) {
     const csrfToken = document.cookie
       .split("; ")
       .find((row) => row.startsWith("csrftoken="))
@@ -828,7 +873,20 @@
           submissionDetails(submissionId: $submissionId) {
             code
             runtime
+            runtimeDisplay
+            runtimePercentile
             memory
+            memoryDisplay
+            memoryPercentile
+            totalCorrect
+            totalTestcases
+            lastTestcase
+            codeOutput
+            expectedOutput
+            runtimeError
+            compileError
+            fullCodeOutput
+            notes
           }
         }
       `,
@@ -848,12 +906,30 @@
     });
 
     const json = await res.json();
-    return json.data?.submissionDetails;
-  }
+    const submissionDetails = json.data?.submissionDetails;
 
-  function getUsernameFromDOM() {
-    const link = document.querySelector('a[href^="/u/"]');
-    return link?.getAttribute("href")?.split("/u/")[1] || null;
+    if (!submissionDetails) return null;
+
+    return {
+      code: submissionDetails.code,
+      submissionDetails: {
+        runtime: submissionDetails.runtime,
+        memory: submissionDetails.memory,
+        runtimeDisplay: submissionDetails.runtimeDisplay,
+        runtimePercentile: submissionDetails.runtimePercentile,
+        memoryDisplay: submissionDetails.memoryDisplay,
+        memoryPercentile: submissionDetails.memoryPercentile,
+        totalCorrect: submissionDetails.totalCorrect,
+        totalTestcases: submissionDetails.totalTestcases,
+        lastTestcase: submissionDetails.lastTestcase,
+        codeOutput: submissionDetails.codeOutput,
+        expectedOutput: submissionDetails.expectedOutput,
+        runtimeError: submissionDetails.runtimeError,
+        compileError: submissionDetails.compileError,
+        fullCodeOutput: submissionDetails.fullCodeOutput,
+        notes: submissionDetails.notes,
+      },
+    };
   }
 
   async function getFromStorage(key, fallback = null) {
@@ -907,72 +983,123 @@
   async function enrichSubmission(sub, seen, visitLog, username) {
     sub.solveTime = deriveSolveTime(sub, visitLog);
 
+    // Start all async operations in parallel
+    const operations = [];
+
+    // 1. Problem description (only if not already seen)
     if (!seen.has(sub.titleSlug)) {
-      const desc = await fetchProblemDescription(sub.titleSlug).catch(
-        () => null
+      operations.push(
+        fetchProblemDescription(sub.titleSlug)
+          .then((desc) => ({ type: "description", data: desc }))
+          .catch(() => ({ type: "description", data: null }))
       );
-      if (desc) {
-        sub.problemDescription = desc;
-        seen.add(sub.titleSlug);
-      }
     }
-    sub.codeDetail = await fetchSubmissionCode(sub.id).catch(() => null);
 
-    // Capture snapshot history for successful submissions only
+    // 2. Problem note (try to fetch, but don't fail the whole process)
+    operations.push(
+      fetchProblemNote(sub.titleSlug)
+        .then((note) => ({ type: "note", data: note }))
+        .catch(() => ({ type: "note", data: null }))
+    );
+
+    // 3. Submission details
+    operations.push(
+      fetchSubmissionDetails(sub.id)
+        .then((details) => ({ type: "submissionDetails", data: details }))
+        .catch(() => ({ type: "submissionDetails", data: null }))
+    );
+
+    // 4. Snapshot data (only for successful submissions)
     if (sub.statusDisplay === "Accepted" && username) {
-      // Get snapshots from IndexedDB
-      let snapshots = [];
-      try {
-        const snapshotData = await leetTrackerDB.getSnapshots(
-          username,
-          sub.titleSlug
-        );
-        snapshots = snapshotData.snapshots || [];
-      } catch (error) {
-        console.warn(
-          "[LeetTracker] IndexedDB read failed for submission enrichment, skipping journey capture:",
-          error
-        );
-        return; // No fallback - skip journey capture if IndexedDB fails
-      }
+      operations.push(
+        leetTrackerDB
+          .getSnapshots(username, sub.titleSlug)
+          .then((snapshotData) => ({ type: "snapshots", data: snapshotData }))
+          .catch((error) => {
+            console.warn(
+              "[LeetTracker] IndexedDB read failed for submission enrichment, skipping journey capture:",
+              error
+            );
+            return { type: "snapshots", data: null };
+          })
+      );
+    }
 
-      if (snapshots.length > 0) {
-        // Only include snapshots that occurred before this submission
-        const relevantSnapshots = snapshots.filter(
-          (snapshot) => snapshot.timestamp <= sub.timestamp * 1000 // submission timestamp is in seconds, snapshots in ms
-        );
+    // Wait for all operations to complete
+    const results = await Promise.all(operations);
 
-        if (relevantSnapshots.length > 0) {
-          const codingJourney = {
-            snapshotCount: relevantSnapshots.length,
-            snapshots: relevantSnapshots,
-            totalCodingTime:
-              relevantSnapshots.length > 0
-                ? relevantSnapshots[relevantSnapshots.length - 1].timestamp -
-                  relevantSnapshots[0].timestamp
-                : 0,
-            firstSnapshot: relevantSnapshots[0]?.timestamp,
-            lastSnapshot:
-              relevantSnapshots[relevantSnapshots.length - 1]?.timestamp,
-          };
+    // Process all results
+    for (const result of results) {
+      switch (result.type) {
+        case "description":
+          if (result.data) {
+            sub.problemDescription = result.data;
+            seen.add(sub.titleSlug);
+          }
+          break;
 
-          // Store in recent journeys (limited to 20 most recent)
-          sub.codingJourney = codingJourney;
-          await storeRecentJourney(username, sub);
+        case "note":
+          if (result.data) {
+            sub.problemNote = result.data;
+          }
+          break;
 
-          // Replace the full journey data with a reference for storage efficiency
-          sub.codingJourney = {
-            snapshotCount: relevantSnapshots.length,
-            totalCodingTime: codingJourney.totalCodingTime,
-            firstSnapshot: codingJourney.firstSnapshot,
-            lastSnapshot: codingJourney.lastSnapshot,
-            hasDetailedJourney: true, // Flag to indicate journey is available
-          };
+        case "submissionDetails":
+          if (result.data) {
+            // Keep code at top level for backward compatibility
+            if (result.data.code) {
+              sub.code = result.data.code;
+            }
+            // Add all the enhanced details
+            if (result.data.submissionDetails) {
+              sub.submissionDetails = result.data.submissionDetails;
+            }
+          }
+          break;
 
-          console.log(
-            `[LeetTracker] Captured ${relevantSnapshots.length} snapshots for submission ${sub.id} (${sub.titleSlug})`
-          );
-        }
+        case "snapshots":
+          if (result.data) {
+            const snapshots = result.data.snapshots || [];
+            if (snapshots.length > 0) {
+              // Only include snapshots that occurred before this submission
+              const relevantSnapshots = snapshots.filter(
+                (snapshot) => snapshot.timestamp <= sub.timestamp * 1000 // submission timestamp is in seconds, snapshots in ms
+              );
+
+              if (relevantSnapshots.length > 0) {
+                const codingJourney = {
+                  snapshotCount: relevantSnapshots.length,
+                  snapshots: relevantSnapshots,
+                  totalCodingTime:
+                    relevantSnapshots.length > 0
+                      ? relevantSnapshots[relevantSnapshots.length - 1]
+                          .timestamp - relevantSnapshots[0].timestamp
+                      : 0,
+                  firstSnapshot: relevantSnapshots[0]?.timestamp,
+                  lastSnapshot:
+                    relevantSnapshots[relevantSnapshots.length - 1]?.timestamp,
+                };
+
+                // Store in recent journeys (limited to 20 most recent)
+                sub.codingJourney = codingJourney;
+                await storeRecentJourney(username, sub);
+
+                // Replace the full journey data with a reference for storage efficiency
+                sub.codingJourney = {
+                  snapshotCount: relevantSnapshots.length,
+                  totalCodingTime: codingJourney.totalCodingTime,
+                  firstSnapshot: codingJourney.firstSnapshot,
+                  lastSnapshot: codingJourney.lastSnapshot,
+                  hasDetailedJourney: true, // Flag to indicate journey is available
+                };
+
+                console.log(
+                  `[LeetTracker] Captured ${relevantSnapshots.length} snapshots for submission ${sub.id} (${sub.titleSlug})`
+                );
+              }
+            }
+          }
+          break;
       }
     }
   }
@@ -1182,36 +1309,6 @@
     }
   }
 
-  // Memoized user ID extraction - only scan keys once per session
-  let memoizedUserId = null;
-  async function getMemoizedUserId() {
-    if (memoizedUserId !== null) {
-      return memoizedUserId;
-    }
-
-    try {
-      const dbInfo = await exploreLeetCodeIndexedDB();
-      if (!dbInfo || !dbInfo.keys || dbInfo.keys.length === 0) {
-        return null;
-      }
-
-      // Extract user ID from any key with pattern: problemId_userId_language
-      for (const key of dbInfo.keys) {
-        const keyStr = key.toString();
-        const match = keyStr.match(/^\d+_(\d+)_\w+/);
-        if (match) {
-          memoizedUserId = match[1];
-          console.log(`[LeetTracker] Memoized user ID: ${memoizedUserId}`);
-          return memoizedUserId;
-        }
-      }
-
-      return null;
-    } catch (error) {
-      return null;
-    }
-  }
-
   // Persistent mapping of problem slug to problem ID
   const problemSlugToIdMap = new Map(); // In-memory cache for current session
   const PROBLEM_ID_STORAGE_KEY = "leettracker_problem_slug_to_id_map";
@@ -1243,59 +1340,40 @@
       // Continue to script lookup
     }
 
-    // Not found in cache - do expensive script lookup once
-    const problemId = await lookupProblemIdFromScripts();
-    if (problemId) {
-      // Cache both in memory and persistent storage
-      problemSlugToIdMap.set(problemSlug, problemId);
-
-      try {
-        const storedMap = await getFromStorage(PROBLEM_ID_STORAGE_KEY, {});
-        storedMap[problemSlug] = problemId;
-        await saveToStorage(PROBLEM_ID_STORAGE_KEY, storedMap);
-        console.log(
-          `[LeetTracker] Cached problem ID mapping: ${problemSlug} -> ${problemId}`
-        );
-      } catch (error) {
-        console.warn(
-          "[LeetTracker] Failed to persist problem ID mapping:",
-          error
-        );
-      }
-    }
-
-    return problemId;
-  }
-
-  // Optimized script lookup - only called when not cached
-  async function lookupProblemIdFromScripts() {
+    // Not found in cache - fetch from API
+    let question = null;
     try {
-      // First try: Look for Next.js data script (most likely location)
-      const nextDataScript = document.querySelector("script#__NEXT_DATA__");
-      if (nextDataScript && nextDataScript.textContent) {
-        const match = nextDataScript.textContent.match(
-          /"questionId":\s*"?(\d+)"?/
-        );
-        if (match) {
-          return match[1];
-        }
-      }
-
-      // Fallback: Scan other scripts only if needed
-      const scripts = document.querySelectorAll("script:not(#__NEXT_DATA__)");
-      for (const script of scripts) {
-        if (script.textContent && script.textContent.includes("questionId")) {
-          const match = script.textContent.match(/"questionId":\s*"?(\d+)"?/);
-          if (match) {
-            return match[1];
-          }
-        }
-      }
-
-      return null;
+      question = await fetchProblemDescription(problemSlug);
     } catch (error) {
+      console.warn(
+        `[LeetTracker] fetchProblemDescription failed for slug '${problemSlug}':`,
+        error
+      );
       return null;
     }
+    if (!question || !question.questionId) {
+      console.warn(
+        `[LeetTracker] No valid question data for slug '${problemSlug}'.`
+      );
+      return null;
+    }
+    const problemId = question.questionId;
+    // Cache both in memory and persistent storage
+    problemSlugToIdMap.set(problemSlug, problemId);
+    try {
+      const storedMap = await getFromStorage(PROBLEM_ID_STORAGE_KEY, {});
+      storedMap[problemSlug] = problemId;
+      await saveToStorage(PROBLEM_ID_STORAGE_KEY, storedMap);
+      console.log(
+        `[LeetTracker] Cached problem ID mapping: ${problemSlug} -> ${problemId}`
+      );
+    } catch (error) {
+      console.warn(
+        "[LeetTracker] Failed to persist problem ID mapping:",
+        error
+      );
+    }
+    return problemId;
   }
 
   // Function to get current problem ID - now much simpler and faster
@@ -1321,7 +1399,7 @@
   async function getCodeFromLeetCodeDB(problemId, language = "python3") {
     try {
       // Get the memoized user ID first
-      const userId = await getMemoizedUserId();
+      const { userId } = getUserInfoWithCache();
       if (!userId) {
         return null;
       }
@@ -1331,22 +1409,9 @@
         return null;
       }
 
-      // Construct specific keys using the memoized user ID
-      const timestampKey = `${problemId}_${userId}_${language}-updated-time`;
+      // Construct specific key using the memoized user ID
       const codeKey = `${problemId}_${userId}_${language}`;
 
-      // Try to get the timestamp to verify the key exists and is recent
-      try {
-        const timestamp = await getCodeByKey(dbInfo, timestampKey);
-        if (typeof timestamp === "number") {
-          // Get the actual code using the corresponding code key
-          return await getCodeByKey(dbInfo, codeKey);
-        }
-      } catch (error) {
-        // Fall back to direct code key access
-      }
-
-      // Direct fallback - try the code key without timestamp check
       try {
         return await getCodeByKey(dbInfo, codeKey);
       } catch (error) {
@@ -1368,8 +1433,6 @@
         const result = request.result;
         if (result && typeof result === "string" && result.length > 0) {
           resolve(result);
-        } else if (typeof result === "number") {
-          resolve(result); // For timestamp values
         } else {
           resolve(null);
         }
@@ -1660,45 +1723,98 @@
     }, 1000); // 1 s poll, negligible cost
   }
 
+  // --- User Info Fetch/Caching ---
+  let cachedUserInfo = { userId: null, username: null };
+  let userInfoPromise = null;
+  function getUserInfoWithCache(maxAttempts = 10) {
+    if (cachedUserInfo.userId && cachedUserInfo.username) {
+      return Promise.resolve(cachedUserInfo);
+    }
+    if (userInfoPromise) return userInfoPromise;
+    userInfoPromise = (async () => {
+      let attempt = 0;
+      let delay = 1000;
+      while (attempt < maxAttempts) {
+        try {
+          const body = {
+            query: `query globalData { userStatus { username activeSessionId isSignedIn } }`,
+            variables: {},
+            operationName: "globalData",
+          };
+          const res = await fetch(GRAPHQL_URL, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Referer: "https://leetcode.com/problemset/all/",
+            },
+            body: JSON.stringify(body),
+            credentials: "include",
+          });
+          const json = await res.json();
+          const userStatus = json.data?.userStatus;
+          if (
+            userStatus &&
+            userStatus.isSignedIn &&
+            userStatus.username &&
+            userStatus.activeSessionId
+          ) {
+            cachedUserInfo = {
+              userId: userStatus.activeSessionId.toString(),
+              username: userStatus.username,
+            };
+            return cachedUserInfo;
+          }
+        } catch (e) {
+          // continue to retry
+        }
+        console.warn(
+          `[LeetTracker] Failed to fetch user sign-in status, retrying in ${delay}ms`
+        );
+        await new Promise((r) => setTimeout(r, delay));
+        delay = Math.min(delay * 2, 30000); // exponential backoff, max 30s
+        attempt++;
+      }
+      return cachedUserInfo;
+    })();
+    return userInfoPromise;
+  }
+
   function trySyncIfLoggedIn() {
-    const username = getUsernameFromDOM();
     const SELECTOR = '[data-e2e-locator="console-submit-button"]';
 
-    if (username) {
-      console.log(
-        `[LeetTracker] Detected login as ${username}. Starting sync...`
-      );
-      syncSubmissions(username);
-      setInterval(() => {
-        if (!window.location.pathname.startsWith("/problems/")) return;
+    // We'll try to get user info first. Eventually we'll just stop.
+    // When a user logs in, currently, leetcode resets the page and
+    // we reload this entire script anyway so we don't need to retry
+    // forever.
+    getUserInfoWithCache().then(({ userId, username }) => {
+      if (username && userId) {
+        console.log(`[LeetTracker] Detected login as ${username}, starting.`);
         syncSubmissions(username);
-      }, 1 * 60 * 1000);
-      setInterval(() => {
-        if (!window.location.pathname.startsWith("/problems/")) return;
+        setInterval(() => {
+          if (!window.location.pathname.startsWith("/problems/")) return;
+          syncSubmissions(username);
+        }, 1 * 60 * 1000);
+        setInterval(() => {
+          if (!window.location.pathname.startsWith("/problems/")) return;
 
-        const btn = document.querySelector(SELECTOR);
-        if (btn && btn.dataset.leettrackerHooked !== "true") {
-          hookSubmitButton(username);
-        }
-      }, 5000); // 5 s poll
-      startProblemNavigationWatcher(username);
-      startCodeSnapshotWatcher(username);
-      startFreshStartWatcher(username);
+          const btn = document.querySelector(SELECTOR);
+          if (btn && btn.dataset.leettrackerHooked !== "true") {
+            hookSubmitButton(username);
+          }
+        }, 5000); // 5 s poll
+        startProblemNavigationWatcher(username);
+        startCodeSnapshotWatcher(username);
+        startFreshStartWatcher(username);
 
-      return true;
-    } else {
-      console.log("[LeetTracker] Not logged in, skipping fetch.");
-    }
-    return false;
+        return true;
+      } else {
+        console.log("[LeetTracker] Not logged in, exiting.");
+      }
+      return false;
+    });
   }
 
   if (window.location.hostname === "leetcode.com") {
-    const intervalId = setInterval(() => {
-      if (trySyncIfLoggedIn()) {
-        clearInterval(intervalId);
-      } else {
-        console.log("[LeetTracker] Waiting for login...");
-      }
-    }, 5000);
+    trySyncIfLoggedIn();
   }
 })();
