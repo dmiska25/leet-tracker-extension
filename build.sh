@@ -13,6 +13,7 @@ mkdir -p build/lib
 # Copy main files to src subfolder for organization
 echo "📁 Copying main files..."
 cp inject_webapp.js build/src/
+cp page-inject.js build/src/
 cp *.png build/src/
 
 # Copy appropriate manifest to src folder based on build type

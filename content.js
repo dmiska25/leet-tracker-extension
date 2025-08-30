@@ -124,6 +124,16 @@
             journeyStore.createIndex("timestamp", "timestamp");
             journeyStore.createIndex("archivedAt", "archivedAt");
           }
+
+          // Run events store
+          if (!db.objectStoreNames.contains("runs")) {
+            const runStore = db.createObjectStore("runs", {
+              keyPath: "id",
+            });
+            runStore.createIndex("username", "username");
+            runStore.createIndex("problemSlug", "problemSlug");
+            runStore.createIndex("timestamp", "timestamp");
+          }
         };
       });
     }
@@ -179,6 +189,64 @@
           }
         };
         request.onerror = () => reject(request.error);
+      });
+    }
+
+    // --- Run Code Event Management ---
+    async storeRunEvent(username, problemSlug, runData) {
+      const db = await this.ensureDB();
+      const id = `${username}_${problemSlug}_${
+        runData.timestamp || Date.now()
+      }`;
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction(["runs"], "readwrite");
+        const store = transaction.objectStore("runs");
+        const data = {
+          id,
+          username,
+          problemSlug,
+          ...runData,
+        };
+        const request = store.put(data);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    async getRunEventsInWindow(username, problemSlug, startMs, endMs) {
+      const db = await this.ensureDB();
+
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(["runs"], "readonly");
+        const store = tx.objectStore("runs");
+        const idx = store.index("timestamp");
+
+        const range =
+          startMs != null && endMs != null
+            ? IDBKeyRange.bound(startMs, endMs)
+            : startMs != null
+            ? IDBKeyRange.lowerBound(startMs)
+            : endMs != null
+            ? IDBKeyRange.upperBound(endMs)
+            : null;
+
+        const runs = [];
+        const req = range ? idx.openCursor(range) : idx.openCursor();
+
+        req.onsuccess = (ev) => {
+          const cursor = ev.target.result;
+          if (cursor) {
+            const v = cursor.value;
+            if (v.username === username && v.problemSlug === problemSlug) {
+              runs.push(v);
+            }
+            cursor.continue();
+          } else {
+            runs.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+            resolve(runs);
+          }
+        };
+        req.onerror = () => reject(req.error);
       });
     }
 
@@ -450,6 +518,9 @@
       if (matchesTemplate) {
         // If the template matches but we only have 1 snapshot, we're already done
         if (snapshots.length == 1) return false;
+
+        // add a new navigation so reset the start time too
+        recordProblemVisit(username, problemSlug);
 
         // Clear snapshots from IndexedDB
         try {
@@ -967,7 +1038,9 @@
     );
   }
 
-  function deriveSolveTime(sub, visitLog) {
+  // --- Keep or replace your previous deriveSolveTime with this windowed version ---
+  function deriveSolveWindow(sub, visitLog) {
+    // sub.timestamp is seconds; visitLog entries are seconds; DAY_S is in scope.
     const hits = visitLog
       .filter(
         (e) =>
@@ -977,130 +1050,226 @@
       )
       .map((e) => e.ts);
 
-    return hits.length ? sub.timestamp - Math.max(...hits) : null;
+    if (!hits.length) return { startSec: null, solveTimeSec: null };
+    const startSec = Math.max(...hits);
+    return { startSec, solveTimeSec: sub.timestamp - startSec };
   }
 
+  /** Fetch description if needed (does not mutate `seen`). */
+  async function fetchDescriptionIfNeeded(sub, seen) {
+    if (seen.has(sub.titleSlug)) return null;
+    try {
+      return await fetchProblemDescription(sub.titleSlug);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Fetch note (safe). */
+  async function fetchNoteSafe(sub) {
+    try {
+      return await fetchProblemNote(sub.titleSlug);
+    } catch {
+      return null;
+    }
+  }
+
+  /** Fetch submission details (safe). */
+  async function fetchSubmissionDetailsSafe(sub) {
+    try {
+      return await fetchSubmissionDetails(sub.id); // { code, submissionDetails } | null
+    } catch {
+      return null;
+    }
+  }
+
+  /** Load snapshots (only when applicable), safe. */
+  async function loadSnapshotsIfApplicable(sub, username) {
+    if (sub.statusDisplay !== "Accepted" || !username) return null;
+    try {
+      return await leetTrackerDB.getSnapshots(username, sub.titleSlug);
+    } catch (error) {
+      console.warn(
+        "[LeetTracker] IndexedDB read failed for submission enrichment, skipping journey capture:",
+        error
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Build coding journey summary from snapshots that occurred
+   * before (or at) the submission time.
+   * Returns { codingJourney, earliestSnapshotMs } or null.
+   */
+  function buildCodingJourneyFromSnapshots(snapshotsData, submissionTsSec) {
+    if (!snapshotsData) return null;
+    const snapshots = snapshotsData.snapshots || [];
+    if (snapshots.length === 0) return null;
+
+    const cutoffMs = submissionTsSec * 1000;
+    const relevant = snapshots.filter((s) => s.timestamp <= cutoffMs);
+    if (relevant.length === 0) return null;
+
+    const first = relevant[0].timestamp;
+    const last = relevant[relevant.length - 1].timestamp;
+    const totalCodingTime = last - first;
+
+    return {
+      codingJourney: {
+        snapshotCount: relevant.length,
+        snapshots: relevant,
+        totalCodingTime,
+        firstSnapshot: first,
+        lastSnapshot: last,
+      },
+      earliestSnapshotMs: first,
+    };
+  }
+
+  /**
+   * Attach runs to submission using earliest credible start candidate.
+   * Returns runEvents summary or null.
+   * NOTE: keeps Accepted-only gating to mirror snapshot policy.
+   */
+  async function buildRunEventsForSubmission(sub, username, startCandidatesMs) {
+    if (sub.statusDisplay !== "Accepted" || !username) return null;
+
+    const endMs = sub.timestamp * 1000;
+    if (!startCandidatesMs || startCandidatesMs.length === 0) return null;
+
+    const startMs = Math.min(...startCandidatesMs);
+
+    const runs = await leetTrackerDB.getRunEventsInWindow(
+      username,
+      sub.titleSlug,
+      startMs,
+      endMs
+    );
+
+    if (!runs || runs.length === 0) return null;
+
+    const summarized = runs.map((r) => ({
+      id: r.id || null,
+      startedAt: r.startedAt || null,
+      statusMsg: r.statusMsg || "",
+      totalCorrect: r.totalCorrect ?? null,
+      totalTestcases: r.totalTestcases ?? null,
+      runtimeError: r.runtimeError ?? null,
+      compareResult: r.compareResult ?? null,
+      runtime: r.runtime ?? null,
+      memory: r.memory ?? null,
+    }));
+
+    return {
+      count: runs.length,
+      firstRun: runs[0].timestamp,
+      lastRun: runs[runs.length - 1].timestamp,
+      hasDetailedRuns: true,
+      runs: summarized,
+      _window: { startMs, endMs },
+    };
+  }
+
+  /** Small mutator to attach coding journey + store recent journey. */
+  async function attachCodingJourney(sub, username, codingJourney) {
+    // Store full journey (with snapshots) in recent list & archive
+    sub.codingJourney = codingJourney;
+    await storeRecentJourney(username, sub);
+
+    // Replace with compact summary on the submission object
+    sub.codingJourney = {
+      snapshotCount: codingJourney.snapshotCount,
+      totalCodingTime: codingJourney.totalCodingTime,
+      firstSnapshot: codingJourney.firstSnapshot,
+      lastSnapshot: codingJourney.lastSnapshot,
+      hasDetailedJourney: true,
+    };
+  }
+
+  /** Final small mutator to attach runEvents. */
+  function attachRunEvents(sub, runEvents) {
+    if (runEvents) {
+      sub.runEvents = runEvents;
+    }
+  }
+
+  /**
+   * Orchestrator: small, readable, and side-effect minimal.
+   * - Computes solve window (visit-log derived).
+   * - Fetches description / note / submission details / snapshots in parallel.
+   * - Builds coding journey (if any) and attaches it.
+   * - Builds and attaches run-events in [start → submission].
+   */
   async function enrichSubmission(sub, seen, visitLog, username) {
-    sub.solveTime = deriveSolveTime(sub, visitLog);
+    // 1) Compute solve window from visit log (+ keep prior public field)
+    const { startSec, solveTimeSec } = deriveSolveWindow(sub, visitLog);
+    sub.solveTime = solveTimeSec;
 
-    // Start all async operations in parallel
-    const operations = [];
+    const startCandidatesMs = [];
+    if (startSec != null) startCandidatesMs.push(startSec * 1000);
 
-    // 1. Problem description (only if not already seen)
-    if (!seen.has(sub.titleSlug)) {
-      operations.push(
-        fetchProblemDescription(sub.titleSlug)
-          .then((desc) => ({ type: "description", data: desc }))
-          .catch(() => ({ type: "description", data: null }))
+    // 2) Kick off all fetches in parallel
+    const [desc, note, details, snapshotsData] = await Promise.all([
+      fetchDescriptionIfNeeded(sub, seen),
+      fetchNoteSafe(sub),
+      fetchSubmissionDetailsSafe(sub),
+      loadSnapshotsIfApplicable(sub, username),
+    ]);
+
+    // 3) Apply description/note/details
+    if (desc) {
+      sub.problemDescription = desc;
+      seen.add(sub.titleSlug);
+    }
+    if (note) sub.problemNote = note;
+
+    if (details) {
+      if (details.code) sub.code = details.code;
+      if (details.submissionDetails)
+        sub.submissionDetails = details.submissionDetails;
+    }
+
+    // 4) Build & attach coding journey
+    const journey = buildCodingJourneyFromSnapshots(
+      snapshotsData,
+      sub.timestamp
+    );
+    if (journey) {
+      startCandidatesMs.push(journey.earliestSnapshotMs);
+      await attachCodingJourney(sub, username, journey.codingJourney);
+      console.log(
+        `[LeetTracker] Captured ${journey.codingJourney.snapshotCount} snapshots for submission ${sub.id} (${sub.titleSlug})`
       );
     }
 
-    // 2. Problem note (try to fetch, but don't fail the whole process)
-    operations.push(
-      fetchProblemNote(sub.titleSlug)
-        .then((note) => ({ type: "note", data: note }))
-        .catch(() => ({ type: "note", data: null }))
-    );
-
-    // 3. Submission details
-    operations.push(
-      fetchSubmissionDetails(sub.id)
-        .then((details) => ({ type: "submissionDetails", data: details }))
-        .catch(() => ({ type: "submissionDetails", data: null }))
-    );
-
-    // 4. Snapshot data (only for successful submissions)
-    if (sub.statusDisplay === "Accepted" && username) {
-      operations.push(
-        leetTrackerDB
-          .getSnapshots(username, sub.titleSlug)
-          .then((snapshotData) => ({ type: "snapshots", data: snapshotData }))
-          .catch((error) => {
-            console.warn(
-              "[LeetTracker] IndexedDB read failed for submission enrichment, skipping journey capture:",
-              error
-            );
-            return { type: "snapshots", data: null };
-          })
+    // 5) Build & attach run events (window: earliest start candidate → submission time)
+    try {
+      const runEvents = await buildRunEventsForSubmission(
+        sub,
+        username,
+        startCandidatesMs
       );
-    }
-
-    // Wait for all operations to complete
-    const results = await Promise.all(operations);
-
-    // Process all results
-    for (const result of results) {
-      switch (result.type) {
-        case "description":
-          if (result.data) {
-            sub.problemDescription = result.data;
-            seen.add(sub.titleSlug);
-          }
-          break;
-
-        case "note":
-          if (result.data) {
-            sub.problemNote = result.data;
-          }
-          break;
-
-        case "submissionDetails":
-          if (result.data) {
-            // Keep code at top level for backward compatibility
-            if (result.data.code) {
-              sub.code = result.data.code;
-            }
-            // Add all the enhanced details
-            if (result.data.submissionDetails) {
-              sub.submissionDetails = result.data.submissionDetails;
-            }
-          }
-          break;
-
-        case "snapshots":
-          if (result.data) {
-            const snapshots = result.data.snapshots || [];
-            if (snapshots.length > 0) {
-              // Only include snapshots that occurred before this submission
-              const relevantSnapshots = snapshots.filter(
-                (snapshot) => snapshot.timestamp <= sub.timestamp * 1000 // submission timestamp is in seconds, snapshots in ms
-              );
-
-              if (relevantSnapshots.length > 0) {
-                const codingJourney = {
-                  snapshotCount: relevantSnapshots.length,
-                  snapshots: relevantSnapshots,
-                  totalCodingTime:
-                    relevantSnapshots.length > 0
-                      ? relevantSnapshots[relevantSnapshots.length - 1]
-                          .timestamp - relevantSnapshots[0].timestamp
-                      : 0,
-                  firstSnapshot: relevantSnapshots[0]?.timestamp,
-                  lastSnapshot:
-                    relevantSnapshots[relevantSnapshots.length - 1]?.timestamp,
-                };
-
-                // Store in recent journeys (limited to 20 most recent)
-                sub.codingJourney = codingJourney;
-                await storeRecentJourney(username, sub);
-
-                // Replace the full journey data with a reference for storage efficiency
-                sub.codingJourney = {
-                  snapshotCount: relevantSnapshots.length,
-                  totalCodingTime: codingJourney.totalCodingTime,
-                  firstSnapshot: codingJourney.firstSnapshot,
-                  lastSnapshot: codingJourney.lastSnapshot,
-                  hasDetailedJourney: true, // Flag to indicate journey is available
-                };
-
-                console.log(
-                  `[LeetTracker] Captured ${relevantSnapshots.length} snapshots for submission ${sub.id} (${sub.titleSlug})`
-                );
-              }
-            }
-          }
-          break;
+      attachRunEvents(sub, runEvents);
+      if (runEvents) {
+        const { _window } = runEvents;
+        console.log(
+          `[LeetTracker] Attached ${runEvents.count} run(s) to submission ${
+            sub.id
+          } (${sub.titleSlug}) in window ${new Date(
+            _window.startMs
+          ).toISOString()} → ${new Date(_window.endMs).toISOString()}`
+        );
+      } else {
+        console.log(
+          `[LeetTracker] No run events attached for ${sub.titleSlug} (no start window or no runs).`
+        );
       }
+    } catch (err) {
+      console.warn(
+        `[LeetTracker] Run enrichment failed for ${sub.titleSlug}:`,
+        err
+      );
     }
   }
 
@@ -1723,6 +1892,99 @@
     }, 1000); // 1 s poll, negligible cost
   }
 
+  // Load page-inject.js into the *page context* (CSP-safe external file)
+  function injectRunCodeWatcher() {
+    try {
+      // Only run in the top frame; many LeetCode subframes are sandboxed/srcdoc
+      if (window.top !== window) {
+        console.debug(
+          "[LeetTracker] injectRunCodeWatcher: not top frame, skipping"
+        );
+        return;
+      }
+
+      // Compute extension URL. In bad contexts Chrome returns ".../invalid/..."
+      const url =
+        chrome && chrome.runtime && chrome.runtime.getURL
+          ? chrome.runtime.getURL("page-inject.js")
+          : null;
+
+      if (!url || url.includes("chrome-extension://invalid")) {
+        console.warn(
+          "[LeetTracker] injectRunCodeWatcher: computed invalid URL:",
+          url
+        );
+        return; // Don’t try to append; it will 404/ERR_FAILED
+      }
+
+      const s = document.createElement("script");
+      s.src = url;
+      s.async = false; // ensure deterministic evaluation order
+      s.type = "text/javascript";
+      s.onload = () => s.remove(); // keep DOM clean
+      (document.head || document.documentElement).appendChild(s);
+
+      console.log("[LeetTracker] page-inject.js injected:", url);
+    } catch (e) {
+      console.error("[LeetTracker] injectRunCodeWatcher failed:", e);
+    }
+  }
+
+  // Bridge messages from page → content, then store using DB
+  function startRunCodeMessageBridge(username) {
+    window.addEventListener("message", async (event) => {
+      if (event.source !== window) return;
+      const d = event.data;
+      if (!d || d.source !== "leettracker") return;
+
+      if (d.type === "lt-run-result") {
+        const { interpret_id, data, meta } = d.payload || {};
+        const problemSlug = getCurrentProblemSlug() || "unknown";
+
+        // Prefer the exact code sent with interpret_solution; otherwise fall back
+        let code = meta?.typed_code;
+        if (!code) {
+          try {
+            const codeResult = await getCurrentCode();
+            code = codeResult?.bestGuess || "";
+          } catch {
+            code = "";
+          }
+        }
+
+        const runRecord = {
+          timestamp: Date.now(),
+          startedAt: meta?.startedAt || null,
+          interpretId: interpret_id || null,
+          code,
+          lang: meta?.lang || data?.lang || null,
+          questionId: meta?.question_id || null,
+          dataInput: meta?.data_input || null,
+          state: data?.state || null, // "SUCCESS"/"FAILURE"
+          statusMsg: data?.status_msg || "", // "Accepted", etc.
+          statusCode: data?.status_code ?? null,
+          totalCorrect: data?.total_correct ?? data?.totalCorrect ?? null,
+          totalTestcases: data?.total_testcases ?? data?.totalTestcases ?? null,
+          fullRuntimeError: data?.full_runtime_error || null,
+          runtimeError: data?.runtime_error || null,
+          runtime: data?.status_runtime || data?.display_runtime || null,
+          memory: data?.status_memory || data?.memory || null,
+          codeAnswer: data?.code_answer ?? null, // array of outputs
+          expectedCodeAnswer: data?.expected_code_answer ?? null,
+          compareResult: data?.compare_result ?? null,
+        };
+
+        await leetTrackerDB.storeRunEvent(username, problemSlug, runRecord);
+        console.log(
+          `[LeetTracker][RunWatcher] Stored run via network intercept for ${problemSlug}:`,
+          `${runRecord.totalCorrect ?? "?"}/${
+            runRecord.totalTestcases ?? "?"
+          } correct, ${runRecord.statusMsg}`
+        );
+      }
+    });
+  }
+
   // --- User Info Fetch/Caching ---
   let cachedUserInfo = { userId: null, username: null };
   let userInfoPromise = null;
@@ -1802,9 +2064,12 @@
             hookSubmitButton(username);
           }
         }, 5000); // 5 s poll
+
         startProblemNavigationWatcher(username);
         startCodeSnapshotWatcher(username);
         startFreshStartWatcher(username);
+        injectRunCodeWatcher();
+        startRunCodeMessageBridge(username);
 
         return true;
       } else {
