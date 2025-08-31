@@ -1156,6 +1156,7 @@
       totalCorrect: r.totalCorrect ?? null,
       totalTestcases: r.totalTestcases ?? null,
       runtimeError: r.runtimeError ?? null,
+      lastTestcase: r.lastTestcase ?? null,
       compareResult: r.compareResult ?? null,
       runtime: r.runtime ?? null,
       memory: r.memory ?? null,
@@ -1967,6 +1968,7 @@
           totalTestcases: data?.total_testcases ?? data?.totalTestcases ?? null,
           fullRuntimeError: data?.full_runtime_error || null,
           runtimeError: data?.runtime_error || null,
+          lastTestcase: data?.last_testcase || null,
           runtime: data?.status_runtime || data?.display_runtime || null,
           memory: data?.status_memory || data?.memory || null,
           codeAnswer: data?.code_answer ?? null, // array of outputs
