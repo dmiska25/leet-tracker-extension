@@ -603,7 +603,7 @@
   async function detectCurrentLanguage(code, problemSlug = null) {
     // 1. Try per-problem language from localStorage
     try {
-      const { userId } = getUserInfoWithCache();
+      const { userId } = await getUserInfoWithCache();
       const problemId = problemSlug
         ? await getProblemIdFromSlug(problemSlug)
         : null;
@@ -1569,7 +1569,7 @@
   async function getCodeFromLeetCodeDB(problemId, language = "python3") {
     try {
       // Get the memoized user ID first
-      const { userId } = getUserInfoWithCache();
+      const { userId } = await getUserInfoWithCache();
       if (!userId) {
         return null;
       }
@@ -1639,22 +1639,7 @@
       // Continue to fallback
     }
 
-    // Method 2: Fallback to Monaco Editor textarea
-    if (!bestResult) {
-      try {
-        const monacoTextarea = document.querySelector(
-          "textarea.inputarea.monaco-mouse-cursor-text"
-        );
-        if (monacoTextarea && monacoTextarea.value) {
-          bestResult = monacoTextarea.value;
-          bestMethod = "monacoTextarea";
-        }
-      } catch (error) {
-        // Continue to next fallback
-      }
-    }
-
-    // Method 3: Final fallback - try any textarea with content
+    // Method 2: Fallback - try any textarea with content
     if (!bestResult) {
       try {
         const allTextareas = document.querySelectorAll("textarea");
