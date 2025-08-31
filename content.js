@@ -1158,6 +1158,7 @@
       runtimeError: r.runtimeError ?? null,
       lastTestcase: r.lastTestcase ?? null,
       compareResult: r.compareResult ?? null,
+      code: r.code ?? null,
       runtime: r.runtime ?? null,
       memory: r.memory ?? null,
     }));
