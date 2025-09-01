@@ -23,7 +23,8 @@
     const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
     try {
       // 1) Run Code trigger: POST .../problems/{slug}/interpret_solution/
-      if (url.includes("/interpret_solution/")) {
+      if (url.includes("/interpret_solution/") || url.includes("/submit/")) {
+        console.log("[LeetTracker] Intercepted run code/submit fetch:", url);
         const opts = args[1] || {};
         const payload =
           opts && typeof opts.body === "string"
@@ -35,7 +36,8 @@
           .clone()
           .json()
           .then((data) => {
-            const interpret_id = data?.interpret_id;
+            const rawId = data?.interpret_id ?? data?.submission_id;
+            const interpret_id = rawId != null ? String(rawId) : undefined;
             if (interpret_id) {
               pending.set(interpret_id, {
                 typed_code: payload?.typed_code ?? null,
@@ -61,15 +63,16 @@
 
       // 2) Polling: GET .../submissions/detail/{interpret_id}/check/
       if (url.includes("/submissions/detail/") && url.endsWith("/check/")) {
+        console.log("[LeetTracker] Intercepted run status fetch:", url);
         const res = await origFetch.apply(this, args);
         res
           .clone()
           .json()
           .then((data) => {
-            const interpret_id =
-              data?.submission_id ||
-              url.match(/detail\/([^/]+)\/check\/?/)?.[1] ||
-              null;
+            const rawId = data?.interpret_id ?? data?.submission_id;
+            const interpret_id = rawId != null ? String(rawId) : undefined;
+
+            if (!interpret_id) return; // responses without interpret_id => pending result
 
             const meta = interpret_id ? pending.get(interpret_id) : undefined;
             const done = data?.state === "SUCCESS" || data?.state === "FAILURE";

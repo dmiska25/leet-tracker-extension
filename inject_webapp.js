@@ -50,15 +50,35 @@
         ]);
         const recentJourneys = recentJourneysResult[recentJourneysKey] || [];
 
-        // Enhance submissions with detailed journey data if available
+        // Enhance with recent run groupings
+        const recentRunsKey = `leettracker_recent_runs_${username}`;
+        const recentRunsResult = await chrome.storage.local.get([
+          recentRunsKey,
+        ]);
+        const recentRunGroups = recentRunsResult[recentRunsKey] || [];
+
+        // Build lookup maps
         const journeysById = new Map(
           recentJourneys.map((j) => [String(j.submissionId), j])
         );
+        const runGroupsById = new Map(
+          recentRunGroups.map((g) => [String(g.submissionId), g])
+        );
+
+        // Enhance submissions with detailed journey and runEvents data if available
         const enhancedData = baseData.map((s) => {
-          const j = journeysById.get(String(s.id));
-          return j && j.codingJourney
-            ? { ...s, codingJourney: j.codingJourney }
-            : s;
+          const sid = String(s.id);
+          const j = journeysById.get(sid);
+          const g = runGroupsById.get(sid);
+
+          let out = s;
+          if (j && j.codingJourney) {
+            out = { ...out, codingJourney: j.codingJourney };
+          }
+          if (g && g.runEvents) {
+            out = { ...out, runEvents: g.runEvents };
+          }
+          return out;
         });
 
         window.postMessage(
@@ -72,7 +92,7 @@
           "*"
         );
         console.log(
-          `[LeetTracker Inject] Enhanced chunk ${index} for ${username} sent (${enhancedData.length} submissions, ${recentJourneys.length} recent journeys)`
+          `[LeetTracker Inject] Enhanced chunk ${index} for ${username} sent (${enhancedData.length} submissions, ${recentJourneys.length} recent journeys, ${recentRunGroups.length} recent run groups)`
         );
       } catch (e) {
         console.error(
