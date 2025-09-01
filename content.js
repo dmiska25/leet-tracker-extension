@@ -17,6 +17,7 @@
     `leettracker_templates_${problemSlug}`;
   const getRecentJourneysKey = (username) =>
     `leettracker_recent_journeys_${username}`;
+  const getRecentRunsKey = (username) => `leettracker_recent_runs_${username}`;
 
   // Lock mechanism to prevent concurrent snapshot/reset operations
   const snapshotLocks = new Map(); // Map of `${username}_${problemSlug}` -> Promise
@@ -133,6 +134,17 @@
             runStore.createIndex("username", "username");
             runStore.createIndex("problemSlug", "problemSlug");
             runStore.createIndex("timestamp", "timestamp");
+          }
+
+          // Run groups archive store - permanent backup of grouped runs by submission
+          if (!db.objectStoreNames.contains("runGroups")) {
+            const groupStore = db.createObjectStore("runGroups", {
+              keyPath: "id",
+            });
+            groupStore.createIndex("username", "username");
+            groupStore.createIndex("titleSlug", "titleSlug");
+            groupStore.createIndex("timestamp", "timestamp");
+            groupStore.createIndex("archivedAt", "archivedAt");
           }
         };
       });
@@ -309,6 +321,29 @@
           titleSlug: submission.titleSlug,
           timestamp: submission.timestamp,
           codingJourney: submission.codingJourney,
+          archivedAt: Date.now(),
+        };
+
+        const request = store.put(data);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+      });
+    }
+
+    async storeRunGroupArchive(username, submission) {
+      const db = await this.ensureDB();
+
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction(["runGroups"], "readwrite");
+        const store = transaction.objectStore("runGroups");
+
+        const data = {
+          id: `${username}_${submission.id}`,
+          username,
+          submissionId: submission.id,
+          titleSlug: submission.titleSlug,
+          timestamp: submission.timestamp,
+          runEvents: submission.runEvents, // expect detailed grouping if present on submission at archive time
           archivedAt: Date.now(),
         };
 
@@ -1189,10 +1224,15 @@
     };
   }
 
-  /** Final small mutator to attach runEvents. */
+  /** Final small mutator to attach runEvents as compact summary only. */
   function attachRunEvents(sub, runEvents) {
     if (runEvents) {
-      sub.runEvents = runEvents;
+      sub.runEvents = {
+        count: runEvents.count,
+        firstRun: runEvents.firstRun,
+        lastRun: runEvents.lastRun,
+        hasDetailedRuns: true,
+      };
     }
   }
 
@@ -1252,15 +1292,25 @@
         username,
         startCandidatesMs
       );
+
+      // Persist detailed grouping in rolling recent cache + archive (Accepted-only already enforced upstream)
+      if (runEvents) {
+        await storeRecentRunGroup(username, sub, runEvents);
+      }
+
+      // Attach compact summary to the stored submission
       attachRunEvents(sub, runEvents);
+
       if (runEvents) {
         const { _window } = runEvents;
         console.log(
-          `[LeetTracker] Attached ${runEvents.count} run(s) to submission ${
-            sub.id
-          } (${sub.titleSlug}) in window ${new Date(
-            _window.startMs
-          ).toISOString()} → ${new Date(_window.endMs).toISOString()}`
+          `[LeetTracker] Attached ${
+            runEvents.count
+          } run(s) (summary) to submission ${sub.id} (${
+            sub.titleSlug
+          }) in window ${new Date(_window.startMs).toISOString()} → ${new Date(
+            _window.endMs
+          ).toISOString()}`
         );
       } else {
         console.log(
@@ -1444,6 +1494,51 @@
     const recent = await getFromStorage(key, []);
 
     return recent.find((journey) => journey.submissionId === submissionId);
+  }
+
+  // Recent runs management for successful submissions (grouped by submission)
+  async function storeRecentRunGroup(username, submission, runEvents) {
+    if (!runEvents || !runEvents.runs) return;
+
+    const key = getRecentRunsKey(username);
+    const recent = await getFromStorage(key, []);
+
+    // Add new run grouping at the beginning
+    recent.unshift({
+      submissionId: submission.id,
+      titleSlug: submission.titleSlug,
+      timestamp: submission.timestamp,
+      runEvents, // detailed grouping
+    });
+
+    // Keep only last 20 groupings
+    if (recent.length > 20) {
+      recent.splice(20);
+    }
+
+    await saveToStorage(key, recent);
+
+    // ALSO backup to IndexedDB archive (permanent storage)
+    try {
+      // Provisionally attach detailed runs to the submission object for archive write
+      const original = submission.runEvents;
+      submission.runEvents = runEvents;
+      await leetTrackerDB.storeRunGroupArchive(username, submission);
+      // Restore compact summary on the submission (if any)
+      submission.runEvents = original;
+      console.log(
+        `[LeetTracker] Archived run group for ${submission.titleSlug} (submission ${submission.id})`
+      );
+    } catch (error) {
+      console.warn(
+        "[LeetTracker] Failed to archive run group to IndexedDB:",
+        error
+      );
+    }
+
+    console.log(
+      `[LeetTracker] Stored recent run group for ${submission.titleSlug}`
+    );
   }
 
   // Function to explore LeetCode's IndexedDB
