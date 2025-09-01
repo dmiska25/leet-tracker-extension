@@ -36,9 +36,8 @@
           .clone()
           .json()
           .then((data) => {
-            const interpret_id = String(
-              data?.interpret_id || data?.submission_id || null
-            );
+            const rawId = data?.interpret_id ?? data?.submission_id;
+            const interpret_id = rawId != null ? String(rawId) : undefined;
             if (interpret_id) {
               pending.set(interpret_id, {
                 typed_code: payload?.typed_code ?? null,
@@ -70,9 +69,8 @@
           .clone()
           .json()
           .then((data) => {
-            const interpret_id = String(
-              data?.interpret_id || data?.submission_id || null
-            );
+            const rawId = data?.interpret_id ?? data?.submission_id;
+            const interpret_id = rawId != null ? String(rawId) : undefined;
 
             if (!interpret_id) return; // responses without interpret_id => pending result
 
