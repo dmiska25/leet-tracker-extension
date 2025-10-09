@@ -1312,10 +1312,6 @@
             _window.endMs
           ).toISOString()}`
         );
-      } else {
-        console.log(
-          `[LeetTracker] No run events attached for ${sub.titleSlug} (no start window or no runs).`
-        );
       }
     } catch (err) {
       console.warn(
@@ -1377,6 +1373,9 @@
         const sub = subs[i];
         await enrichSubmission(sub, seen, visitLog, username);
 
+        chunk.push(sub);
+
+        // Create new chunk after reaching 100 submissions
         if (chunk.length >= 100) {
           await flushChunk(
             username,
@@ -1390,10 +1389,19 @@
           chunk = [];
           chunkIdx++;
           await new Promise((r) => setTimeout(r, 20_000));
+        } // Update manifest and flush current chunk every 20 submissions (without creating new chunk)
+        else if (chunk.length % 20 === 0 && chunk.length < 100) {
+          await flushChunk(
+            username,
+            chunkIdx,
+            chunk,
+            meta,
+            manifestKey,
+            seenKey,
+            seen
+          );
+          await new Promise((r) => setTimeout(r, 10_000));
         }
-
-        chunk.push(sub);
-        if (i % 20 === 19) await new Promise((r) => setTimeout(r, 10_000));
       }
 
       if (chunk.length) {
@@ -2136,7 +2144,6 @@
         console.log(`[LeetTracker] Detected login as ${username}, starting.`);
         syncSubmissions(username);
         setInterval(() => {
-          if (!window.location.pathname.startsWith("/problems/")) return;
           syncSubmissions(username);
         }, 1 * 60 * 1000);
         setInterval(() => {
