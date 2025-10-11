@@ -23,8 +23,8 @@
             type: "response_chunk_manifest",
             username,
             chunks: filtered,
-            total: result[manifestKey]?.total || null,
-            totalSynced: result[manifestKey]?.totalSynced || null,
+            total: result[manifestKey]?.total ?? null,
+            totalSynced: result[manifestKey]?.totalSynced ?? null,
           },
           "*"
         );
