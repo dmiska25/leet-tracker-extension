@@ -1,8 +1,7 @@
 (function () {
   const GRAPHQL_URL = "https://leetcode.com/graphql/";
-  const HEARTBEAT_KEY = "leettracker_sync_heartbeat";
-  const HEARTBEAT_INTERVAL_MS = 5000;
-  const HEARTBEAT_TIMEOUT_MS = 10000;
+  const SYNC_LOCK_KEY = "leettracker_sync_lock";
+  const HEARTBEAT_TIMEOUT_MS = 180000; // Consider stale after 3 minutes of no heartbeat
   const DAY_S = 86400;
 
   const getVisitLogKey = (u) => `leettracker_problem_visit_log_${u}`;
@@ -52,7 +51,7 @@
 
     async init() {
       return new Promise((resolve, reject) => {
-        const request = indexedDB.open("LeetTrackerDB", 1);
+        const request = indexedDB.open("LeetTrackerDB", 2);
 
         request.onerror = () => {
           console.error("[LeetTracker] IndexedDB init failed:", request.error);
@@ -95,8 +94,14 @@
           resolve();
         };
 
-        request.onupgradeneeded = (event) => {
+        request.onupgradeneeded = async (event) => {
           const db = event.target.result;
+          const oldVersion = event.oldVersion;
+          const transaction = event.target.transaction;
+
+          console.log(
+            `[LeetTracker] Upgrading IndexedDB from version ${oldVersion} to 2`
+          );
 
           // Templates store
           if (!db.objectStoreNames.contains("templates")) {
@@ -145,6 +150,174 @@
             groupStore.createIndex("titleSlug", "titleSlug");
             groupStore.createIndex("timestamp", "timestamp");
             groupStore.createIndex("archivedAt", "archivedAt");
+          }
+
+          // Migration from v1 to v2: Convert seen problems list to new object format
+          if (oldVersion === 1) {
+            console.log(
+              "[LeetTracker] Migrating seen problems from v1 to v2 format..."
+            );
+
+            // Wait for transaction to complete before accessing chrome.storage
+            transaction.oncomplete = async () => {
+              try {
+                // Get all usernames that might have seen problems data
+                const allKeys = await new Promise((resolve) => {
+                  chrome.storage.local.get(null, (items) => {
+                    resolve(Object.keys(items));
+                  });
+                });
+
+                // Find all seen problems keys (format: leettracker_seen_problems_<username>)
+                const seenProblemsKeys = allKeys.filter((key) =>
+                  key.startsWith("leettracker_seen_problems_")
+                );
+
+                let migratedCount = 0;
+                for (const key of seenProblemsKeys) {
+                  const seenData = await new Promise((resolve) => {
+                    chrome.storage.local.get([key], (result) => {
+                      resolve(result[key]);
+                    });
+                  });
+
+                  // Check if it needs migration
+                  let needsMigration = false;
+                  let newFormat = {};
+
+                  if (Array.isArray(seenData)) {
+                    // Old format: array of strings or objects
+                    needsMigration = true;
+                    seenData.forEach((item) => {
+                      if (typeof item === "string") {
+                        // Very old format: just a slug string
+                        newFormat[item] = {
+                          isPremium: null, // Force re-fetch to get actual status
+                          hasDescription: true,
+                        };
+                      } else if (item && item.slug) {
+                        // Array of objects format
+                        newFormat[item.slug] = {
+                          isPremium:
+                            item.isPremium !== undefined
+                              ? item.isPremium
+                              : null,
+                          hasDescription: item.hasDescription || false,
+                        };
+                      }
+                    });
+                  } else if (seenData && typeof seenData === "object") {
+                    // Already in object format, check if it needs property updates
+                    const firstKey = Object.keys(seenData)[0];
+                    if (
+                      firstKey &&
+                      !seenData[firstKey].hasOwnProperty("isPremium")
+                    ) {
+                      // Old object format without isPremium
+                      needsMigration = true;
+                      Object.keys(seenData).forEach((slug) => {
+                        newFormat[slug] = {
+                          isPremium: null, // Force re-fetch to get actual status
+                          hasDescription:
+                            seenData[slug].hasDescription || false,
+                        };
+                      });
+                    }
+                  }
+
+                  if (needsMigration) {
+                    // Save migrated data
+                    await new Promise((resolve) => {
+                      chrome.storage.local.set({ [key]: newFormat }, resolve);
+                    });
+
+                    migratedCount++;
+                    console.log(
+                      `[LeetTracker] Migrated ${key}: ${
+                        Object.keys(newFormat).length
+                      } problems`
+                    );
+                  }
+                }
+
+                if (migratedCount > 0) {
+                  console.log(
+                    `[LeetTracker] Migration complete: ${migratedCount} user(s) migrated`
+                  );
+                } else {
+                  console.log(
+                    "[LeetTracker] No migration needed (already in v2 format)"
+                  );
+                }
+
+                // Add manifest.total field for all users (v2 migration)
+                console.log(
+                  "[LeetTracker] Computing manifest.total for all users..."
+                );
+
+                // Find all manifest keys
+                const manifestKeys = allKeys.filter((key) =>
+                  key.startsWith("leettracker_sync_manifest_")
+                );
+
+                let manifestUpdateCount = 0;
+                for (const manifestKey of manifestKeys) {
+                  const manifest = await new Promise((resolve) => {
+                    chrome.storage.local.get([manifestKey], (result) => {
+                      resolve(result[manifestKey]);
+                    });
+                  });
+
+                  // Only update if manifest exists and doesn't already have total field
+                  if (manifest && !manifest.hasOwnProperty("total")) {
+                    const username = manifestKey.replace(
+                      "leettracker_sync_manifest_",
+                      ""
+                    );
+                    const chunks = manifest.chunks || [];
+
+                    // Count submissions across all chunks
+                    let total = 0;
+                    for (const chunkMeta of chunks) {
+                      if (chunkMeta && chunkMeta.index !== undefined) {
+                        const chunkKey = `leettracker_leetcode_chunk_${username}_${chunkMeta.index}`;
+                        const chunk = await new Promise((resolve) => {
+                          chrome.storage.local.get([chunkKey], (result) => {
+                            resolve(result[chunkKey] || []);
+                          });
+                        });
+                        total += chunk.length;
+                      }
+                    }
+
+                    // Update manifest with total field
+                    manifest.total = total;
+                    await new Promise((resolve) => {
+                      chrome.storage.local.set(
+                        { [manifestKey]: manifest },
+                        resolve
+                      );
+                    });
+
+                    manifestUpdateCount++;
+                    console.log(
+                      `[LeetTracker] Updated manifest for ${username}: total = ${total} submissions`
+                    );
+                  }
+                }
+
+                if (manifestUpdateCount > 0) {
+                  console.log(
+                    `[LeetTracker] Manifest total field added for ${manifestUpdateCount} user(s)`
+                  );
+                }
+              } catch (error) {
+                console.error(
+                  "[LeetTracker] Error during seen problems migration:",
+                  error
+                );
+              }
+            };
           }
         };
       });
@@ -888,6 +1061,63 @@
     return newSubmissions;
   }
 
+  async function fetchProblemPremiumStatus(titleSlug) {
+    const fetchFn = async () => {
+      const body = {
+        query: `
+          query selectProblem($titleSlug: String!) {
+            question(titleSlug: $titleSlug) {
+              isPaidOnly
+            }
+          }
+        `,
+        variables: { titleSlug },
+        operationName: "selectProblem",
+      };
+
+      const res = await fetch(GRAPHQL_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Referer: "https://leetcode.com/problemset/all/",
+        },
+        body: JSON.stringify(body),
+        credentials: "include",
+      });
+
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+
+      const json = await res.json();
+      return json.data?.question || null;
+    };
+
+    const validator = (result) => {
+      // Empty/invalid response - likely rate limited
+      if (result === null || result.isPaidOnly === undefined) {
+        console.warn(
+          `[LeetTracker] Empty premium status response for ${titleSlug}, likely rate limited`
+        );
+        return false;
+      }
+
+      return true;
+    };
+
+    const result = await retryWithBackoff(fetchFn, validator);
+
+    // Default to false if all retries fail (safer to attempt fetch than skip)
+    if (result === null) {
+      console.error(
+        `[LeetTracker] Failed to get premium status for ${titleSlug} after retries, assuming non-premium`
+      );
+      return false;
+    }
+
+    return result.isPaidOnly || false;
+  }
+
   async function fetchProblemDescription(titleSlug) {
     const body = {
       query: `
@@ -1052,25 +1282,176 @@
     });
   }
 
-  async function leaderOrQuit() {
+  // Generate unique session ID for this content script instance
+  const SESSION_ID = `session_${Date.now()}_${Math.random()
+    .toString(36)
+    .substr(2, 9)}`;
+
+  // In-memory flag to track if this session owns the lock
+  let isLockOwner = false;
+
+  /**
+   * Check if a lock is available for acquisition.
+   * Returns { canAcquire: boolean, reason: string }
+   */
+  function checkLockAvailability(lock, context = "") {
+    if (!lock || !lock.isLocked) {
+      return { canAcquire: true, reason: "no_lock" };
+    }
+
     const now = Date.now();
-    const last = await getFromStorage(HEARTBEAT_KEY, 0);
-    if (now - last < HEARTBEAT_TIMEOUT_MS) return false;
+    const timeSinceHeartbeat = now - (lock.lastHeartbeat || 0);
 
-    // jitter then re-check
-    await new Promise((r) => setTimeout(r, Math.random() * 1000 + 100));
-    const last2 = await getFromStorage(HEARTBEAT_KEY, 0);
-    if (Date.now() - last2 < HEARTBEAT_TIMEOUT_MS) return false;
+    // Fresh heartbeat (active sync in progress)
+    if (timeSinceHeartbeat < HEARTBEAT_TIMEOUT_MS) {
+      console.log(
+        `[LeetTracker] Sync lock held by ${lock.sessionId}${context}`,
+        { timeSinceHeartbeat, sessionId: lock.sessionId }
+      );
+      return { canAcquire: false, reason: "active" };
+    }
 
-    await saveToStorage(HEARTBEAT_KEY, Date.now());
+    // Stale heartbeat - sync has crashed or stopped updating
+    console.log(
+      `[LeetTracker] Sync lock expired (no heartbeat for ${Math.floor(
+        timeSinceHeartbeat / 1000
+      )}s)${context}`,
+      { timeSinceHeartbeat, sessionId: lock.sessionId }
+    );
+    return { canAcquire: true, reason: "heartbeat_expired" };
+  }
+
+  /**
+   * Attempt to acquire the sync lock.
+   * Returns true if lock was acquired, false otherwise.
+   *
+   * Lock structure in storage:
+   * {
+   *   sessionId: string,      // Who owns the lock
+   *   acquiredAt: number,     // When lock was acquired (ms)
+   *   lastHeartbeat: number,  // Last heartbeat update (ms)
+   *   isLocked: boolean       // Hard lock boolean
+   * }
+   */
+  async function acquireSyncLock() {
+    // Step 1: Check current lock state
+    const currentLock = await getFromStorage(SYNC_LOCK_KEY, null);
+    const initialCheck = checkLockAvailability(currentLock);
+
+    if (!initialCheck.canAcquire) {
+      return false;
+    }
+
+    // Step 2: Random jitter to reduce collision probability
+    const jitterMs = Math.random() * 1000 + 100; // 100-1100ms
+    await new Promise((resolve) => setTimeout(resolve, jitterMs));
+
+    // Step 3: Re-check lock state after jitter
+    const recheckLock = await getFromStorage(SYNC_LOCK_KEY, null);
+    const recheckResult = checkLockAvailability(recheckLock, " after jitter");
+
+    if (!recheckResult.canAcquire) {
+      return false;
+    }
+
+    // Step 4: Attempt to acquire lock
+    const acquisitionTime = Date.now();
+    const newLock = {
+      sessionId: SESSION_ID,
+      acquiredAt: acquisitionTime,
+      lastHeartbeat: acquisitionTime,
+      isLocked: true,
+    };
+
+    await saveToStorage(SYNC_LOCK_KEY, newLock);
+
+    // Step 5: Verify we actually got the lock (detect race condition)
+    // Small delay to ensure write completed
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const verifyLock = await getFromStorage(SYNC_LOCK_KEY, null);
+
+    if (!verifyLock || verifyLock.sessionId !== SESSION_ID) {
+      console.log(`[LeetTracker] Lost lock race to another session`, {
+        ourSession: SESSION_ID,
+        winningSession: verifyLock?.sessionId,
+      });
+      return false;
+    }
+
+    // Success! We own the lock
+    isLockOwner = true;
+    console.log(`[LeetTracker] Sync lock acquired`, {
+      sessionId: SESSION_ID,
+      acquiredAt: acquisitionTime,
+    });
     return true;
   }
 
-  function startHeartbeat() {
-    return setInterval(
-      () => saveToStorage(HEARTBEAT_KEY, Date.now()),
-      HEARTBEAT_INTERVAL_MS
-    );
+  /**
+   * Update heartbeat to indicate sync is still in progress.
+   * Also verifies we still own the lock.
+   */
+  async function updateSyncHeartbeat() {
+    if (!isLockOwner) {
+      console.warn(
+        `[LeetTracker] Attempted heartbeat update without lock ownership`
+      );
+      return false;
+    }
+
+    const currentLock = await getFromStorage(SYNC_LOCK_KEY, null);
+
+    // Verify we still own the lock
+    if (!currentLock || currentLock.sessionId !== SESSION_ID) {
+      console.error(`[LeetTracker] Lost lock ownership! Aborting sync.`, {
+        ourSession: SESSION_ID,
+        currentOwner: currentLock?.sessionId,
+      });
+      isLockOwner = false;
+      return false;
+    }
+
+    // Update heartbeat
+    const updatedLock = {
+      ...currentLock,
+      lastHeartbeat: Date.now(),
+    };
+
+    await saveToStorage(SYNC_LOCK_KEY, updatedLock);
+    return true;
+  }
+
+  /**
+   * Release the sync lock.
+   */
+  async function releaseSyncLock() {
+    if (!isLockOwner) {
+      console.warn(`[LeetTracker] Attempted to release lock without ownership`);
+      return;
+    }
+
+    const currentLock = await getFromStorage(SYNC_LOCK_KEY, null);
+
+    // Only release if we still own it
+    if (currentLock && currentLock.sessionId === SESSION_ID) {
+      await saveToStorage(SYNC_LOCK_KEY, {
+        sessionId: null,
+        acquiredAt: null,
+        lastHeartbeat: null,
+        isLocked: false,
+      });
+      console.log(`[LeetTracker] Sync lock released`, {
+        sessionId: SESSION_ID,
+      });
+    } else {
+      console.warn(
+        `[LeetTracker] Lock already taken by another session, skipping release`,
+        { ourSession: SESSION_ID, currentOwner: currentLock?.sessionId }
+      );
+    }
+
+    isLockOwner = false;
   }
 
   // --- Keep or replace your previous deriveSolveTime with this windowed version ---
@@ -1090,17 +1471,90 @@
     return { startSec, solveTimeSec: sub.timestamp - startSec };
   }
 
-  /** Fetch description if needed (does not mutate `seen`). */
-  async function fetchDescriptionIfNeeded(sub, seen) {
-    if (seen.has(sub.titleSlug)) return null;
-    try {
-      return await fetchProblemDescription(sub.titleSlug);
-    } catch {
-      return null;
+  /**
+   * Retry a fetch operation with exponential backoff up to 60 seconds.
+   * Validates the response to detect rate limiting (empty/null responses).
+   */
+  async function retryWithBackoff(fetchFn, validator, maxRetries = 5) {
+    let delay = 2000; // Start with 2 seconds
+    const maxDelay = 60000; // Cap at 60 seconds
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        const result = await fetchFn();
+
+        // If validator passes or returns null, we're good
+        if (validator(result)) {
+          return result;
+        }
+
+        // Failed validation - likely rate limited
+        if (attempt < maxRetries - 1) {
+          console.warn(
+            `[LeetTracker] Rate limit detected (attempt ${
+              attempt + 1
+            }/${maxRetries}), retrying in ${delay / 1000}s...`
+          );
+          await new Promise((r) => setTimeout(r, delay));
+          delay = Math.min(delay * 2, maxDelay);
+        } else {
+          // Final attempt failed
+          console.warn(
+            `[LeetTracker] Rate limit detected on final attempt (${
+              attempt + 1
+            }/${maxRetries}), giving up`
+          );
+        }
+      } catch (error) {
+        if (attempt < maxRetries - 1) {
+          console.warn(
+            `[LeetTracker] Fetch error (attempt ${
+              attempt + 1
+            }/${maxRetries}), retrying in ${delay / 1000}s:`,
+            error
+          );
+          await new Promise((r) => setTimeout(r, delay));
+          delay = Math.min(delay * 2, maxDelay);
+        } else {
+          // Final attempt errored
+          console.warn(
+            `[LeetTracker] Fetch error on final attempt (${
+              attempt + 1
+            }/${maxRetries}):`,
+            error
+          );
+        }
+      }
     }
+
+    return null;
   }
 
-  /** Fetch note (safe). */
+  /** Fetch description if needed (does not mutate `seenMap`). */
+  async function fetchDescriptionIfNeeded(sub, seenMap) {
+    const seenInfo = seenMap[sub.titleSlug];
+    if (seenInfo?.hasDescription) return null;
+
+    return await retryWithBackoff(
+      () => fetchProblemDescription(sub.titleSlug),
+      (result) => {
+        // Rate limited if we got a response but content is missing/empty
+        if (
+          result === null ||
+          !result.content ||
+          result.content.trim() === ""
+        ) {
+          console.warn(
+            `[LeetTracker] Empty description for ${sub.titleSlug}, likely rate limited`
+          );
+          return false;
+        }
+        return true;
+      }
+    );
+  }
+
+  /** Fetch note (safe). No retry - can't detect rate limiting from empty notes */
   async function fetchNoteSafe(sub) {
     try {
       return await fetchProblemNote(sub.titleSlug);
@@ -1111,11 +1565,20 @@
 
   /** Fetch submission details (safe). */
   async function fetchSubmissionDetailsSafe(sub) {
-    try {
-      return await fetchSubmissionDetails(sub.id); // { code, submissionDetails } | null
-    } catch {
-      return null;
-    }
+    return await retryWithBackoff(
+      () => fetchSubmissionDetails(sub.id),
+      (result) => {
+        if (result === null || !result.code || result.code.trim() === "") {
+          console.warn(
+            `[LeetTracker] Empty code for submission ${sub.id}, likely rate limited`
+          );
+          return false; // Reject and retry
+        }
+
+        // Got valid code
+        return true;
+      }
+    );
   }
 
   /** Load snapshots (only when applicable), safe. */
@@ -1239,11 +1702,18 @@
   /**
    * Orchestrator: small, readable, and side-effect minimal.
    * - Computes solve window (visit-log derived).
+   * - Checks premium status FIRST (cached)
    * - Fetches description / note / submission details / snapshots in parallel.
    * - Builds coding journey (if any) and attaches it.
    * - Builds and attaches run-events in [start → submission].
    */
-  async function enrichSubmission(sub, seen, visitLog, username) {
+  async function enrichSubmission(
+    sub,
+    seenMap,
+    visitLog,
+    username,
+    userHasPremium = false
+  ) {
     // 1) Compute solve window from visit log (+ keep prior public field)
     const { startSec, solveTimeSec } = deriveSolveWindow(sub, visitLog);
     sub.solveTime = solveTimeSec;
@@ -1251,18 +1721,69 @@
     const startCandidatesMs = [];
     if (startSec != null) startCandidatesMs.push(startSec * 1000);
 
-    // 2) Kick off all fetches in parallel
+    // 2) Check if problem is premium (from cache or fetch)
+    let seenInfo = seenMap[sub.titleSlug];
+    let isPremiumProblem = false;
+
+    if (seenInfo && seenInfo.isPremium !== null) {
+      // We've seen this problem before AND have cached premium status
+      isPremiumProblem = seenInfo.isPremium;
+    } else {
+      // First time seeing OR isPremium is null (migrated data) - fetch premium status
+      try {
+        isPremiumProblem = await fetchProblemPremiumStatus(sub.titleSlug);
+        seenMap[sub.titleSlug] = {
+          isPremium: isPremiumProblem,
+          hasDescription: seenInfo?.hasDescription || false,
+        };
+      } catch (error) {
+        console.warn(
+          `[LeetTracker] Failed to fetch premium status for ${sub.titleSlug}:`,
+          error
+        );
+        isPremiumProblem = false;
+      }
+    }
+
+    // Store premium status on submission
+    if (isPremiumProblem) {
+      sub.isPremiumProblem = true;
+    }
+
+    // 3) Skip enrichment for premium problems if user doesn't have premium
+    if (isPremiumProblem && !userHasPremium) {
+      return;
+    }
+
+    // 4) Kick off all fetches in parallel (non-premium or user has premium)
     const [desc, note, details, snapshotsData] = await Promise.all([
-      fetchDescriptionIfNeeded(sub, seen),
+      fetchDescriptionIfNeeded(sub, seenMap),
       fetchNoteSafe(sub),
       fetchSubmissionDetailsSafe(sub),
       loadSnapshotsIfApplicable(sub, username),
     ]);
 
-    // 3) Apply description/note/details
+    // 5) Validate critical enrichment data
+    const isFirstTimeSeeing = !seenMap[sub.titleSlug]?.hasDescription;
+
+    if (isFirstTimeSeeing && !desc) {
+      console.error(
+        `[LeetTracker] Failed to fetch description for ${sub.titleSlug} (submission ${sub.id}) after retries - storing incomplete`
+      );
+    }
+
+    if (!details || !details.code) {
+      console.error(
+        `[LeetTracker] Failed to fetch code for submission ${sub.id} (${sub.titleSlug}) after retries - storing incomplete`
+      );
+    }
+
+    // 6) Apply description/note/details
     if (desc) {
       sub.problemDescription = desc;
-      seen.add(sub.titleSlug);
+      // Update seen map with description flag, preserving isPremium (including null)
+      const existing = seenMap[sub.titleSlug] || { isPremium: null };
+      seenMap[sub.titleSlug] = { ...existing, hasDescription: true };
     }
     if (note) sub.problemNote = note;
 
@@ -1272,7 +1793,7 @@
         sub.submissionDetails = details.submissionDetails;
     }
 
-    // 4) Build & attach coding journey
+    // 7) Build & attach coding journey
     const journey = buildCodingJourneyFromSnapshots(
       snapshotsData,
       sub.timestamp
@@ -1285,7 +1806,7 @@
       );
     }
 
-    // 5) Build & attach run events (window: earliest start candidate → submission time)
+    // 8) Build & attach run events (window: earliest start candidate → submission time)
     try {
       const runEvents = await buildRunEventsForSubmission(
         sub,
@@ -1312,10 +1833,6 @@
             _window.endMs
           ).toISOString()}`
         );
-      } else {
-        console.log(
-          `[LeetTracker] No run events attached for ${sub.titleSlug} (no start window or no runs).`
-        );
       }
     } catch (err) {
       console.warn(
@@ -1332,7 +1849,9 @@
     chunksMeta,
     manifestKey,
     seenKey,
-    seenSet
+    seenMap,
+    totalSubs,
+    totalSynced
   ) {
     await saveToStorage(getChunkKey(username, idx), chunk);
     chunksMeta[idx] = {
@@ -1344,39 +1863,126 @@
       chunkCount: idx + 1,
       lastTimestamp: chunk.at(-1).timestamp,
       chunks: chunksMeta,
+      total: totalSubs,
+      totalSynced: totalSynced,
     });
-    await saveToStorage(seenKey, Array.from(seenSet));
+
+    // Save object directly (no conversion needed)
+    await saveToStorage(seenKey, seenMap);
     console.log(`[LeetTracker] Saved chunk ${idx}`);
   }
 
   async function syncSubmissions(username) {
-    if (!(await leaderOrQuit())) return;
+    // Attempt to acquire the sync lock
+    if (!(await acquireSyncLock())) {
+      console.log(`[LeetTracker] Could not acquire sync lock, skipping sync`);
+      return;
+    }
 
-    const beat = startHeartbeat();
+    console.log(
+      "[LeetTracker] Starting submission sync...",
+      username,
+      new Date().toISOString()
+    );
+
+    // Critical threshold: 15s before timeout (165s)
+    const CRITICAL_THRESHOLD_MS = HEARTBEAT_TIMEOUT_MS - 15000;
+
     try {
       const manifestKey = getManifestKey(username);
       const seenKey = getSeenProblemsKey(username);
       const visitLogKey = getVisitLogKey(username);
 
-      const [visitLog, manifest, seenArr] = await Promise.all([
+      const [visitLog, manifest, seenMap, userInfo] = await Promise.all([
         getFromStorage(visitLogKey, []),
         getFromStorage(manifestKey, {}),
-        getFromStorage(seenKey, []),
+        getFromStorage(seenKey, {}),
+        getUserInfoWithCache(),
       ]);
 
-      const seen = new Set(seenArr);
+      const userHasPremium = userInfo.isPremium || false;
       const lastT = manifest.lastTimestamp || 0;
+      const prevTotalSubs = manifest.total || 0;
       const subs = await fetchAllSubmissions(lastT);
-      if (!subs.length) return console.log("[LeetTracker] No new submissions.");
+      const newTotalSubs = prevTotalSubs + subs.length;
+      let totalSynced = manifest.totalSynced || prevTotalSubs;
+
+      if (!subs.length) {
+        console.log("[LeetTracker] No new submissions.");
+        return;
+      }
 
       let chunkIdx = manifest.chunkCount - 1 || 0;
       let chunk = await getFromStorage(getChunkKey(username, chunkIdx), []);
       const meta = manifest.chunks || [];
 
       for (let i = 0; i < subs.length; i++) {
-        const sub = subs[i];
-        await enrichSubmission(sub, seen, visitLog, username);
+        // 1. Update heartbeat BEFORE enrichment
+        const success = await updateSyncHeartbeat();
+        if (!success) {
+          throw new Error(
+            `Lost lock ownership during heartbeat update at submission ${i}/${subs.length}`
+          );
+        }
 
+        // 2. Get the heartbeat timestamp we just wrote
+        const lockBeforeEnrich = await getFromStorage(SYNC_LOCK_KEY, null);
+        if (!lockBeforeEnrich || lockBeforeEnrich.sessionId !== SESSION_ID) {
+          throw new Error(
+            `Lost lock ownership after heartbeat update at submission ${i}/${subs.length}`
+          );
+        }
+
+        const heartbeatBeforeEnrich = lockBeforeEnrich.lastHeartbeat;
+        const enrichStartTime = Date.now();
+
+        // 3. Do the work (potentially slow)
+        const sub = subs[i];
+        await enrichSubmission(
+          sub,
+          seenMap,
+          visitLog,
+          username,
+          userHasPremium
+        );
+
+        chunk.push(sub);
+        totalSynced++;
+
+        // 4. Verify heartbeat after enrichment
+        const lockAfterEnrich = await getFromStorage(SYNC_LOCK_KEY, null);
+
+        // ABORT if another process took over (heartbeat timestamp changed)
+        if (lockAfterEnrich.lastHeartbeat !== heartbeatBeforeEnrich) {
+          throw new Error(
+            `Another process started sync (heartbeat changed from ${heartbeatBeforeEnrich} to ${lockAfterEnrich.lastHeartbeat}) at submission ${i}/${subs.length}`
+          );
+        }
+
+        // ABORT if enrichment took too long (within 15s of expiring)
+        const enrichDuration = Date.now() - enrichStartTime;
+        if (enrichDuration >= CRITICAL_THRESHOLD_MS) {
+          throw new Error(
+            `Enrichment took ${Math.floor(
+              enrichDuration / 1000
+            )}s (critical threshold: ${Math.floor(
+              CRITICAL_THRESHOLD_MS / 1000
+            )}s), aborting at submission ${i}/${subs.length}`
+          );
+        }
+
+        // 5. Update heartbeat again immediately after verification
+        const successAfter = await updateSyncHeartbeat();
+        if (!successAfter) {
+          throw new Error(
+            `Lost lock ownership during post-enrichment heartbeat update at submission ${i}/${subs.length}`
+          );
+        }
+
+        // Yield to event loop
+        await new Promise((r) => setTimeout(r, 100));
+
+        // Create new chunk after reaching 100 submissions
         if (chunk.length >= 100) {
           await flushChunk(
             username,
@@ -1385,15 +1991,28 @@
             meta,
             manifestKey,
             seenKey,
-            seen
+            seenMap,
+            newTotalSubs,
+            totalSynced
           );
           chunk = [];
           chunkIdx++;
-          await new Promise((r) => setTimeout(r, 20_000));
+          await new Promise((r) => setTimeout(r, 10_000));
+        } // Update manifest and flush current chunk every 20 submissions (without creating new chunk)
+        else if (chunk.length % 20 === 0 && chunk.length < 100) {
+          await flushChunk(
+            username,
+            chunkIdx,
+            chunk,
+            meta,
+            manifestKey,
+            seenKey,
+            seenMap,
+            newTotalSubs,
+            totalSynced
+          );
+          await new Promise((r) => setTimeout(r, 10_000));
         }
-
-        chunk.push(sub);
-        if (i % 20 === 19) await new Promise((r) => setTimeout(r, 10_000));
       }
 
       if (chunk.length) {
@@ -1404,14 +2023,21 @@
           meta,
           manifestKey,
           seenKey,
-          seen
+          seenMap,
+          newTotalSubs,
+          totalSynced
         );
       }
       console.log(`[LeetTracker] Synced ${subs.length} submissions.`);
     } catch (e) {
       console.error("[LeetTracker] Sync failed:", e);
     } finally {
-      clearInterval(beat);
+      console.log(
+        "[LeetTracker] Finished submission sync",
+        username,
+        new Date().toISOString()
+      );
+      await releaseSyncLock();
     }
   }
 
@@ -2082,7 +2708,14 @@
       while (attempt < maxAttempts) {
         try {
           const body = {
-            query: `query globalData { userStatus { username activeSessionId isSignedIn } }`,
+            query: `query globalData { 
+              userStatus { 
+                username 
+                activeSessionId 
+                isSignedIn 
+                isPremium
+              } 
+            }`,
             variables: {},
             operationName: "globalData",
           };
@@ -2106,7 +2739,11 @@
             cachedUserInfo = {
               userId: userStatus.activeSessionId.toString(),
               username: userStatus.username,
+              isPremium: userStatus.isPremium || false,
             };
+            console.log(
+              `[LeetTracker] User ${cachedUserInfo.username} premium status: ${cachedUserInfo.isPremium}`
+            );
             return cachedUserInfo;
           }
         } catch (e) {
@@ -2136,7 +2773,6 @@
         console.log(`[LeetTracker] Detected login as ${username}, starting.`);
         syncSubmissions(username);
         setInterval(() => {
-          if (!window.location.pathname.startsWith("/problems/")) return;
           syncSubmissions(username);
         }, 1 * 60 * 1000);
         setInterval(() => {
