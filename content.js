@@ -1,9 +1,7 @@
 (function () {
   const GRAPHQL_URL = "https://leetcode.com/graphql/";
   const SYNC_LOCK_KEY = "leettracker_sync_lock";
-  const HEARTBEAT_INTERVAL_MS = 5000; // Update heartbeat every 5s
-  const HEARTBEAT_TIMEOUT_MS = 15000; // Consider stale after 15s of no heartbeat
-  const LOCK_STALE_TIMEOUT_MS = 60000; // Hard reset after 60s (crash recovery)
+  const HEARTBEAT_TIMEOUT_MS = 180000; // Consider stale after 3 minutes of no heartbeat
   const DAY_S = 86400;
 
   const getVisitLogKey = (u) => `leettracker_problem_visit_log_${u}`;
@@ -1303,9 +1301,8 @@
 
     const now = Date.now();
     const timeSinceHeartbeat = now - (lock.lastHeartbeat || 0);
-    const timeSinceAcquired = now - (lock.acquiredAt || 0);
 
-    // Fresh lock (active sync in progress)
+    // Fresh heartbeat (active sync in progress)
     if (timeSinceHeartbeat < HEARTBEAT_TIMEOUT_MS) {
       console.log(
         `[LeetTracker] Sync lock held by ${lock.sessionId}${context}`,
@@ -1314,22 +1311,14 @@
       return { canAcquire: false, reason: "active" };
     }
 
-    // Stale but not expired (potential crash, wait longer)
-    if (timeSinceAcquired < LOCK_STALE_TIMEOUT_MS) {
-      console.log(`[LeetTracker] Sync lock stale but not expired${context}`, {
-        timeSinceHeartbeat,
-        timeSinceAcquired,
-        sessionId: lock.sessionId,
-      });
-      return { canAcquire: false, reason: "stale" };
-    }
-
-    // Expired - can be forcibly taken
+    // Stale heartbeat - sync has crashed or stopped updating
     console.log(
-      `[LeetTracker] Sync lock expired, will attempt to acquire${context}`,
-      { timeSinceAcquired, sessionId: lock.sessionId }
+      `[LeetTracker] Sync lock expired (no heartbeat for ${Math.floor(
+        timeSinceHeartbeat / 1000
+      )}s)${context}`,
+      { timeSinceHeartbeat, sessionId: lock.sessionId }
     );
-    return { canAcquire: true, reason: "expired" };
+    return { canAcquire: true, reason: "heartbeat_expired" };
   }
 
   /**
@@ -1463,20 +1452,6 @@
     }
 
     isLockOwner = false;
-  }
-
-  /**
-   * Start heartbeat interval during sync.
-   * Returns interval ID.
-   */
-  function startSyncHeartbeat() {
-    return setInterval(async () => {
-      const stillOwner = await updateSyncHeartbeat();
-      if (!stillOwner) {
-        console.error(`[LeetTracker] Heartbeat failed - no longer lock owner!`);
-        // The sync function will check isLockOwner and abort
-      }
-    }, HEARTBEAT_INTERVAL_MS);
   }
 
   // --- Keep or replace your previous deriveSolveTime with this windowed version ---
@@ -1910,7 +1885,8 @@
       new Date().toISOString()
     );
 
-    const heartbeatInterval = startSyncHeartbeat();
+    // Critical threshold: 15s before timeout (165s)
+    const CRITICAL_THRESHOLD_MS = HEARTBEAT_TIMEOUT_MS - 15000;
 
     try {
       const manifestKey = getManifestKey(username);
@@ -1941,14 +1917,26 @@
       const meta = manifest.chunks || [];
 
       for (let i = 0; i < subs.length; i++) {
-        // Check if we still own the lock before processing each submission
-        if (!isLockOwner) {
-          console.error(
-            `[LeetTracker] Lock ownership lost during sync! Aborting at submission ${i}/${subs.length}`
+        // 1. Update heartbeat BEFORE enrichment
+        const success = await updateSyncHeartbeat();
+        if (!success) {
+          throw new Error(
+            `Lost lock ownership during heartbeat update at submission ${i}/${subs.length}`
           );
-          throw new Error("Lock ownership lost during sync");
         }
 
+        // 2. Get the heartbeat timestamp we just wrote
+        const lockBeforeEnrich = await getFromStorage(SYNC_LOCK_KEY, null);
+        if (!lockBeforeEnrich || lockBeforeEnrich.sessionId !== SESSION_ID) {
+          throw new Error(
+            `Lost lock ownership after heartbeat update at submission ${i}/${subs.length}`
+          );
+        }
+
+        const heartbeatBeforeEnrich = lockBeforeEnrich.lastHeartbeat;
+        const enrichStartTime = Date.now();
+
+        // 3. Do the work (potentially slow)
         const sub = subs[i];
         await enrichSubmission(
           sub,
@@ -1960,6 +1948,39 @@
 
         chunk.push(sub);
         totalSynced++;
+
+        // 4. Verify heartbeat after enrichment
+        const lockAfterEnrich = await getFromStorage(SYNC_LOCK_KEY, null);
+
+        // ABORT if another process took over (heartbeat timestamp changed)
+        if (lockAfterEnrich.lastHeartbeat !== heartbeatBeforeEnrich) {
+          throw new Error(
+            `Another process started sync (heartbeat changed from ${heartbeatBeforeEnrich} to ${lockAfterEnrich.lastHeartbeat}) at submission ${i}/${subs.length}`
+          );
+        }
+
+        // ABORT if enrichment took too long (within 15s of expiring)
+        const enrichDuration = Date.now() - enrichStartTime;
+        if (enrichDuration >= CRITICAL_THRESHOLD_MS) {
+          throw new Error(
+            `Enrichment took ${Math.floor(
+              enrichDuration / 1000
+            )}s (critical threshold: ${Math.floor(
+              CRITICAL_THRESHOLD_MS / 1000
+            )}s), aborting at submission ${i}/${subs.length}`
+          );
+        }
+
+        // 5. Update heartbeat again immediately after verification
+        const successAfter = await updateSyncHeartbeat();
+        if (!successAfter) {
+          throw new Error(
+            `Lost lock ownership during post-enrichment heartbeat update at submission ${i}/${subs.length}`
+          );
+        }
+
+        // Yield to event loop
+        await new Promise((r) => setTimeout(r, 100));
 
         // Create new chunk after reaching 100 submissions
         if (chunk.length >= 100) {
@@ -2016,7 +2037,6 @@
         username,
         new Date().toISOString()
       );
-      clearInterval(heartbeatInterval);
       await releaseSyncLock();
     }
   }
