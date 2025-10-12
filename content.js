@@ -1,8 +1,9 @@
 (function () {
   const GRAPHQL_URL = "https://leetcode.com/graphql/";
-  const HEARTBEAT_KEY = "leettracker_sync_heartbeat";
-  const HEARTBEAT_INTERVAL_MS = 5000;
-  const HEARTBEAT_TIMEOUT_MS = 10000;
+  const SYNC_LOCK_KEY = "leettracker_sync_lock";
+  const HEARTBEAT_INTERVAL_MS = 5000; // Update heartbeat every 5s
+  const HEARTBEAT_TIMEOUT_MS = 15000; // Consider stale after 15s of no heartbeat
+  const LOCK_STALE_TIMEOUT_MS = 60000; // Hard reset after 60s (crash recovery)
   const DAY_S = 86400;
 
   const getVisitLogKey = (u) => `leettracker_problem_visit_log_${u}`;
@@ -1283,36 +1284,198 @@
     });
   }
 
-  // In-memory heartbeat for same-tab sync protection (timestamp in ms)
-  let syncHeartbeatInMemory = 0;
+  // Generate unique session ID for this content script instance
+  const SESSION_ID = `session_${Date.now()}_${Math.random()
+    .toString(36)
+    .substr(2, 9)}`;
 
-  async function leaderOrQuit() {
-    // Check max of in-memory and storage timestamps
+  // In-memory flag to track if this session owns the lock
+  let isLockOwner = false;
+
+  /**
+   * Check if a lock is available for acquisition.
+   * Returns { canAcquire: boolean, reason: string }
+   */
+  function checkLockAvailability(lock, context = "") {
+    if (!lock || !lock.isLocked) {
+      return { canAcquire: true, reason: "no_lock" };
+    }
+
     const now = Date.now();
-    const dbHeartbeat = await getFromStorage(HEARTBEAT_KEY, 0);
-    const lastHeartbeat = Math.max(syncHeartbeatInMemory, dbHeartbeat);
+    const timeSinceHeartbeat = now - (lock.lastHeartbeat || 0);
+    const timeSinceAcquired = now - (lock.acquiredAt || 0);
 
-    if (now - lastHeartbeat < HEARTBEAT_TIMEOUT_MS) {
+    // Fresh lock (active sync in progress)
+    if (timeSinceHeartbeat < HEARTBEAT_TIMEOUT_MS) {
+      console.log(
+        `[LeetTracker] Sync lock held by ${lock.sessionId}${context}`,
+        { timeSinceHeartbeat, sessionId: lock.sessionId }
+      );
+      return { canAcquire: false, reason: "active" };
+    }
+
+    // Stale but not expired (potential crash, wait longer)
+    if (timeSinceAcquired < LOCK_STALE_TIMEOUT_MS) {
+      console.log(`[LeetTracker] Sync lock stale but not expired${context}`, {
+        timeSinceHeartbeat,
+        timeSinceAcquired,
+        sessionId: lock.sessionId,
+      });
+      return { canAcquire: false, reason: "stale" };
+    }
+
+    // Expired - can be forcibly taken
+    console.log(
+      `[LeetTracker] Sync lock expired, will attempt to acquire${context}`,
+      { timeSinceAcquired, sessionId: lock.sessionId }
+    );
+    return { canAcquire: true, reason: "expired" };
+  }
+
+  /**
+   * Attempt to acquire the sync lock.
+   * Returns true if lock was acquired, false otherwise.
+   *
+   * Lock structure in storage:
+   * {
+   *   sessionId: string,      // Who owns the lock
+   *   acquiredAt: number,     // When lock was acquired (ms)
+   *   lastHeartbeat: number,  // Last heartbeat update (ms)
+   *   isLocked: boolean       // Hard lock boolean
+   * }
+   */
+  async function acquireSyncLock() {
+    // Step 1: Check current lock state
+    const currentLock = await getFromStorage(SYNC_LOCK_KEY, null);
+    const initialCheck = checkLockAvailability(currentLock);
+
+    if (!initialCheck.canAcquire) {
       return false;
     }
 
-    // jitter then re-check
-    await new Promise((r) => setTimeout(r, Math.random() * 1000 + 100));
-    const dbHeartbeat2 = await getFromStorage(HEARTBEAT_KEY, 0);
-    if (Date.now() - dbHeartbeat2 < HEARTBEAT_TIMEOUT_MS) {
+    // Step 2: Random jitter to reduce collision probability
+    const jitterMs = Math.random() * 1000 + 100; // 100-1100ms
+    await new Promise((resolve) => setTimeout(resolve, jitterMs));
+
+    // Step 3: Re-check lock state after jitter
+    const recheckLock = await getFromStorage(SYNC_LOCK_KEY, null);
+    const recheckResult = checkLockAvailability(recheckLock, " after jitter");
+
+    if (!recheckResult.canAcquire) {
       return false;
     }
 
-    await saveToStorage(HEARTBEAT_KEY, Date.now());
+    // Step 4: Attempt to acquire lock
+    const acquisitionTime = Date.now();
+    const newLock = {
+      sessionId: SESSION_ID,
+      acquiredAt: acquisitionTime,
+      lastHeartbeat: acquisitionTime,
+      isLocked: true,
+    };
+
+    await saveToStorage(SYNC_LOCK_KEY, newLock);
+
+    // Step 5: Verify we actually got the lock (detect race condition)
+    // Small delay to ensure write completed
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const verifyLock = await getFromStorage(SYNC_LOCK_KEY, null);
+
+    if (!verifyLock || verifyLock.sessionId !== SESSION_ID) {
+      console.log(`[LeetTracker] Lost lock race to another session`, {
+        ourSession: SESSION_ID,
+        winningSession: verifyLock?.sessionId,
+      });
+      return false;
+    }
+
+    // Success! We own the lock
+    isLockOwner = true;
+    console.log(`[LeetTracker] Sync lock acquired`, {
+      sessionId: SESSION_ID,
+      acquiredAt: acquisitionTime,
+    });
     return true;
   }
 
-  function startHeartbeat() {
+  /**
+   * Update heartbeat to indicate sync is still in progress.
+   * Also verifies we still own the lock.
+   */
+  async function updateSyncHeartbeat() {
+    if (!isLockOwner) {
+      console.warn(
+        `[LeetTracker] Attempted heartbeat update without lock ownership`
+      );
+      return false;
+    }
+
+    const currentLock = await getFromStorage(SYNC_LOCK_KEY, null);
+
+    // Verify we still own the lock
+    if (!currentLock || currentLock.sessionId !== SESSION_ID) {
+      console.error(`[LeetTracker] Lost lock ownership! Aborting sync.`, {
+        ourSession: SESSION_ID,
+        currentOwner: currentLock?.sessionId,
+      });
+      isLockOwner = false;
+      return false;
+    }
+
+    // Update heartbeat
+    const updatedLock = {
+      ...currentLock,
+      lastHeartbeat: Date.now(),
+    };
+
+    await saveToStorage(SYNC_LOCK_KEY, updatedLock);
+    return true;
+  }
+
+  /**
+   * Release the sync lock.
+   */
+  async function releaseSyncLock() {
+    if (!isLockOwner) {
+      console.warn(`[LeetTracker] Attempted to release lock without ownership`);
+      return;
+    }
+
+    const currentLock = await getFromStorage(SYNC_LOCK_KEY, null);
+
+    // Only release if we still own it
+    if (currentLock && currentLock.sessionId === SESSION_ID) {
+      await saveToStorage(SYNC_LOCK_KEY, {
+        sessionId: null,
+        acquiredAt: null,
+        lastHeartbeat: null,
+        isLocked: false,
+      });
+      console.log(`[LeetTracker] Sync lock released`, {
+        sessionId: SESSION_ID,
+      });
+    } else {
+      console.warn(
+        `[LeetTracker] Lock already taken by another session, skipping release`,
+        { ourSession: SESSION_ID, currentOwner: currentLock?.sessionId }
+      );
+    }
+
+    isLockOwner = false;
+  }
+
+  /**
+   * Start heartbeat interval during sync.
+   * Returns interval ID.
+   */
+  function startSyncHeartbeat() {
     return setInterval(async () => {
-      // Update both locks during heartbeat
-      const now = Date.now();
-      syncHeartbeatInMemory = now;
-      await saveToStorage(HEARTBEAT_KEY, now);
+      const stillOwner = await updateSyncHeartbeat();
+      if (!stillOwner) {
+        console.error(`[LeetTracker] Heartbeat failed - no longer lock owner!`);
+        // The sync function will check isLockOwner and abort
+      }
     }, HEARTBEAT_INTERVAL_MS);
   }
 
@@ -1735,14 +1898,20 @@
   }
 
   async function syncSubmissions(username) {
-    if (!(await leaderOrQuit())) return;
+    // Attempt to acquire the sync lock
+    if (!(await acquireSyncLock())) {
+      console.log(`[LeetTracker] Could not acquire sync lock, skipping sync`);
+      return;
+    }
+
     console.log(
       "[LeetTracker] Starting submission sync...",
       username,
       new Date().toISOString()
     );
 
-    const beat = startHeartbeat();
+    const heartbeatInterval = startSyncHeartbeat();
+
     try {
       const manifestKey = getManifestKey(username);
       const seenKey = getSeenProblemsKey(username);
@@ -1761,13 +1930,25 @@
       const subs = await fetchAllSubmissions(lastT);
       const newTotalSubs = prevTotalSubs + subs.length;
       let totalSynced = manifest.totalSynced || prevTotalSubs;
-      if (!subs.length) return console.log("[LeetTracker] No new submissions.");
+
+      if (!subs.length) {
+        console.log("[LeetTracker] No new submissions.");
+        return;
+      }
 
       let chunkIdx = manifest.chunkCount - 1 || 0;
       let chunk = await getFromStorage(getChunkKey(username, chunkIdx), []);
       const meta = manifest.chunks || [];
 
       for (let i = 0; i < subs.length; i++) {
+        // Check if we still own the lock before processing each submission
+        if (!isLockOwner) {
+          console.error(
+            `[LeetTracker] Lock ownership lost during sync! Aborting at submission ${i}/${subs.length}`
+          );
+          throw new Error("Lock ownership lost during sync");
+        }
+
         const sub = subs[i];
         await enrichSubmission(
           sub,
@@ -1835,7 +2016,8 @@
         username,
         new Date().toISOString()
       );
-      clearInterval(beat);
+      clearInterval(heartbeatInterval);
+      await releaseSyncLock();
     }
   }
 
