@@ -25,6 +25,7 @@
             chunks: filtered,
             total: result[manifestKey]?.total ?? null,
             totalSynced: result[manifestKey]?.totalSynced ?? null,
+            skippedForBackfill: result[manifestKey]?.skippedForBackfill ?? null,
           },
           "*"
         );
