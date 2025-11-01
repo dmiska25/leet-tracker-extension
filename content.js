@@ -1942,7 +1942,8 @@
           visitLog,
           userHasPremium,
           manifest,
-          manifestKey
+          manifestKey,
+          seenKey
         );
         return;
       }
@@ -2130,7 +2131,8 @@
     visitLog,
     userHasPremium,
     manifest,
-    manifestKey
+    manifestKey,
+    seenKey
   ) {
     const MAX_BACKFILL_PER_SYNC = 20;
 
@@ -2213,6 +2215,10 @@
     if (processedCount > 0) {
       manifest.backfillProcessedAt = Date.now();
       await saveToStorage(manifestKey, manifest);
+
+      // Persist seenMap changes (premium status, description flags, etc.)
+      await saveToStorage(seenKey, seenMap);
+
       console.log(
         `[LeetTracker] Backfill: processed ${processedCount}, ${remainingQueue.length} remaining`
       );
