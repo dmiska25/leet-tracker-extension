@@ -1423,6 +1423,17 @@
   }
 
   /**
+   * Update heartbeat and throw error if lock ownership is lost.
+   * Convenience wrapper for critical sections that must abort on lock loss.
+   */
+  async function updateSyncHeartbeatOrFail(context = "") {
+    const success = await updateSyncHeartbeat();
+    if (!success) {
+      throw new Error(`Lost lock ownership during ${context || "operation"}`);
+    }
+  }
+
+  /**
    * Release the sync lock.
    */
   async function releaseSyncLock() {
@@ -1851,7 +1862,8 @@
     seenKey,
     seenMap,
     totalSubs,
-    totalSynced
+    totalSynced,
+    skippedForBackfill
   ) {
     await saveToStorage(getChunkKey(username, idx), chunk);
     chunksMeta[idx] = {
@@ -1865,6 +1877,7 @@
       chunks: chunksMeta,
       total: totalSubs,
       totalSynced: totalSynced,
+      skippedForBackfill: skippedForBackfill,
     });
 
     // Save object directly (no conversion needed)
@@ -1888,10 +1901,16 @@
     // Critical threshold: 15s before timeout (165s)
     const CRITICAL_THRESHOLD_MS = HEARTBEAT_TIMEOUT_MS - 15000;
 
+    // Enrichment cutoff: last 30 days
+    const ENRICHMENT_CUTOFF_DAYS = 30;
+    const ENRICHMENT_CUTOFF_TIMESTAMP =
+      Math.floor(Date.now() / 1000) - ENRICHMENT_CUTOFF_DAYS * 24 * 60 * 60;
+
     try {
       const manifestKey = getManifestKey(username);
       const seenKey = getSeenProblemsKey(username);
       const visitLogKey = getVisitLogKey(username);
+      const backfillQueueKey = `leettracker_backfill_queue_${username}`;
 
       const [visitLog, manifest, seenMap, userInfo] = await Promise.all([
         getFromStorage(visitLogKey, []),
@@ -1906,9 +1925,25 @@
       const subs = await fetchAllSubmissions(lastT);
       const newTotalSubs = prevTotalSubs + subs.length;
       let totalSynced = manifest.totalSynced || prevTotalSubs;
+      let skippedForBackfill = 0;
+
+      console.log(
+        `[LeetTracker] Fetched ${subs.length} new submissions (total: ${newTotalSubs})`
+      );
 
       if (!subs.length) {
         console.log("[LeetTracker] No new submissions.");
+
+        // Even with no new submissions, process backfill queue
+        await processBackfillQueue(
+          username,
+          backfillQueueKey,
+          seenMap,
+          visitLog,
+          userHasPremium,
+          manifest,
+          manifestKey
+        );
         return;
       }
 
@@ -1916,14 +1951,86 @@
       let chunk = await getFromStorage(getChunkKey(username, chunkIdx), []);
       const meta = manifest.chunks || [];
 
-      for (let i = 0; i < subs.length; i++) {
-        // 1. Update heartbeat BEFORE enrichment
-        const success = await updateSyncHeartbeat();
-        if (!success) {
-          throw new Error(
-            `Lost lock ownership during heartbeat update at submission ${i}/${subs.length}`
+      // Helper to flush chunk with all captured variables
+      const executeFlushChunk = async () => {
+        await flushChunk(
+          username,
+          chunkIdx,
+          chunk,
+          meta,
+          manifestKey,
+          seenKey,
+          seenMap,
+          newTotalSubs,
+          totalSynced,
+          skippedForBackfill
+        );
+      };
+
+      // PRE-STEP: Count how many submissions we'll skip for backfill
+      for (const sub of subs) {
+        if (sub.timestamp < ENRICHMENT_CUTOFF_TIMESTAMP) {
+          skippedForBackfill++;
+        }
+      }
+      const enrichedCount = subs.length - skippedForBackfill;
+
+      console.log(
+        `[LeetTracker] Processing ${enrichedCount} recent submissions, queueing ${skippedForBackfill} for backfill`
+      );
+
+      // STEP 1: Process skipped submissions AS IS (no enrichment) and save to chunks
+      if (skippedForBackfill > 0) {
+        const backfillQueue = [];
+        for (let i = 0; i < skippedForBackfill; i++) {
+          const sub = subs[i];
+
+          // Add to backfill queue for later enrichment
+          backfillQueue.push({
+            id: sub.id,
+            titleSlug: sub.titleSlug,
+            chunkIndex: chunkIdx, // Track which chunk it will be in
+          });
+
+          // Add submission AS IS to chunk (no enrichment)
+          chunk.push(sub);
+          totalSynced++;
+
+          // Create new chunk after reaching 100 submissions
+          if (chunk.length >= 100) {
+            await executeFlushChunk();
+            chunk = [];
+            chunkIdx++;
+          }
+        }
+
+        // Flush any remaining submissions from Step 1
+        if (chunk.length > 0) {
+          await executeFlushChunk();
+          // Don't reset chunk, we'll continue adding to it in Step 2
+        }
+
+        // Save backfill queue if we have items to backfill
+        if (backfillQueue.length > 0) {
+          const existingQueue = await getFromStorage(backfillQueueKey, []);
+          const combinedQueue = [...existingQueue, ...backfillQueue.reverse()];
+          await saveToStorage(backfillQueueKey, combinedQueue);
+          console.log(
+            `[LeetTracker] Added ${backfillQueue.length} submissions to backfill queue (total: ${combinedQueue.length})`
           );
         }
+
+        console.log(
+          `[LeetTracker] ${skippedForBackfill} submissions saved for backfill`
+        );
+      }
+
+      // STEP 2: Main loop - process recent submissions with enrichment
+      for (let i = skippedForBackfill; i < subs.length; i++) {
+        // 1. Update heartbeat BEFORE enrichment (abort if lock lost)
+        await updateSyncHeartbeatOrFail(
+          `heartbeat update at submission ${i}/${subs.length}`
+        );
 
         // 2. Get the heartbeat timestamp we just wrote
         const lockBeforeEnrich = await getFromStorage(SYNC_LOCK_KEY, null);
@@ -1936,7 +2043,7 @@
         const heartbeatBeforeEnrich = lockBeforeEnrich.lastHeartbeat;
         const enrichStartTime = Date.now();
 
-        // 3. Do the work (potentially slow)
+        // 3. Do the work - FULL enrichment for recent submissions
         const sub = subs[i];
         await enrichSubmission(
           sub,
@@ -1971,64 +2078,35 @@
           );
         }
 
-        // 5. Update heartbeat again immediately after verification
-        const successAfter = await updateSyncHeartbeat();
-        if (!successAfter) {
-          throw new Error(
-            `Lost lock ownership during post-enrichment heartbeat update at submission ${i}/${subs.length}`
-          );
-        }
+        // 5. Update heartbeat again immediately after verification (abort if lock lost)
+        await updateSyncHeartbeatOrFail(
+          `post-enrichment heartbeat update at submission ${i}/${subs.length}`
+        );
 
         // Yield to event loop
         await new Promise((r) => setTimeout(r, 100));
 
         // Create new chunk after reaching 100 submissions
         if (chunk.length >= 100) {
-          await flushChunk(
-            username,
-            chunkIdx,
-            chunk,
-            meta,
-            manifestKey,
-            seenKey,
-            seenMap,
-            newTotalSubs,
-            totalSynced
-          );
+          await executeFlushChunk();
           chunk = [];
           chunkIdx++;
           await new Promise((r) => setTimeout(r, 10_000));
         } // Update manifest and flush current chunk every 20 submissions (without creating new chunk)
         else if (chunk.length % 20 === 0 && chunk.length < 100) {
-          await flushChunk(
-            username,
-            chunkIdx,
-            chunk,
-            meta,
-            manifestKey,
-            seenKey,
-            seenMap,
-            newTotalSubs,
-            totalSynced
-          );
+          await executeFlushChunk();
           await new Promise((r) => setTimeout(r, 10_000));
         }
       }
 
+      // Flush remaining chunk
       if (chunk.length) {
-        await flushChunk(
-          username,
-          chunkIdx,
-          chunk,
-          meta,
-          manifestKey,
-          seenKey,
-          seenMap,
-          newTotalSubs,
-          totalSynced
-        );
+        await executeFlushChunk();
       }
-      console.log(`[LeetTracker] Synced ${subs.length} submissions.`);
+
+      console.log(
+        `[LeetTracker] Synced ${subs.length} submissions (${enrichedCount} fully enriched, ${skippedForBackfill} saved for backfill)`
+      );
     } catch (e) {
       console.error("[LeetTracker] Sync failed:", e);
     } finally {
@@ -2038,6 +2116,106 @@
         new Date().toISOString()
       );
       await releaseSyncLock();
+    }
+  }
+
+  /**
+   * Process up to 20 submissions from the backfill queue.
+   * Groups by chunk to minimize storage operations.
+   */
+  async function processBackfillQueue(
+    username,
+    backfillQueueKey,
+    seenMap,
+    visitLog,
+    userHasPremium,
+    manifest,
+    manifestKey
+  ) {
+    const MAX_BACKFILL_PER_SYNC = 20;
+
+    const queue = await getFromStorage(backfillQueueKey, []);
+    if (!queue || queue.length === 0) {
+      return; // Nothing to backfill
+    }
+
+    console.log(
+      `[LeetTracker] Processing backfill queue (${queue.length} remaining)...`
+    );
+
+    // Take first 20 submissions
+    const batchToProcess = queue.slice(0, MAX_BACKFILL_PER_SYNC);
+    const remainingQueue = queue.slice(MAX_BACKFILL_PER_SYNC);
+
+    // Group by chunk index to minimize storage operations
+    const byChunk = new Map();
+    for (const item of batchToProcess) {
+      if (!byChunk.has(item.chunkIndex)) {
+        byChunk.set(item.chunkIndex, []);
+      }
+      byChunk.get(item.chunkIndex).push(item.id);
+    }
+
+    // Process each chunk
+    let processedCount = 0;
+    for (const [chunkIndex, subIds] of byChunk) {
+      try {
+        const chunk = await getFromStorage(
+          getChunkKey(username, chunkIndex),
+          []
+        );
+
+        for (const subId of subIds) {
+          // Update heartbeat before enriching each submission (abort if lock lost)
+          await updateSyncHeartbeatOrFail(
+            `backfill enrichment (chunk ${chunkIndex}, sub ${subId})`
+          );
+
+          const sub = chunk.find((s) => s.id === subId);
+          if (sub) {
+            // Re-enrich with full data
+            await enrichSubmission(
+              sub,
+              seenMap,
+              visitLog,
+              username,
+              userHasPremium
+            );
+            processedCount++;
+          }
+
+          // Update heartbeat after enriching each submission (abort if lock lost)
+          await updateSyncHeartbeatOrFail(
+            `backfill post-enrichment (chunk ${chunkIndex}, sub ${subId})`
+          );
+        }
+
+        // Save chunk with all enriched submissions
+        await saveToStorage(getChunkKey(username, chunkIndex), chunk);
+      } catch (error) {
+        // If lock ownership lost, re-throw to abort backfill
+        if (error.message && error.message.includes("Lost lock ownership")) {
+          throw error;
+        }
+
+        console.warn(
+          `[LeetTracker] Backfill failed for chunk ${chunkIndex}:`,
+          error
+        );
+        // Continue processing other chunks for non-lock errors
+      }
+    }
+
+    // Update backfill queue
+    await saveToStorage(backfillQueueKey, remainingQueue);
+
+    // Update manifest with backfill timestamp (notify webapp)
+    if (processedCount > 0) {
+      manifest.backfillProcessedAt = Date.now();
+      await saveToStorage(manifestKey, manifest);
+      console.log(
+        `[LeetTracker] Backfill: processed ${processedCount}, ${remainingQueue.length} remaining`
+      );
     }
   }
 
