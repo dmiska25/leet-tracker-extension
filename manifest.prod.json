@@ -11,29 +11,19 @@
   "content_scripts": [
     {
       "matches": ["https://leetcode.com/*"],
-      "js": [
-        "lt-global.js",
-        "lt-db.js",
-        "lt-lcdb.js",
-        "lt-locks.js",
-        "lt-net.js",
-        "lt-snapshots.js",
-        "lt-ingest.js",
-        "lt-watchers.js",
-        "content.js"
-      ]
+      "js": ["src/injection/content.js"]
     },
     {
       "matches": [
         "https://leet-tracker-log.vercel.app/*"
       ],
-      "js": ["inject_webapp.js"],
+      "js": ["src/injection/webapp.js"],
       "run_at": "document_start"
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["page-inject.js"],
+      "resources": ["src/injection/page.js"],
       "matches": ["https://leetcode.com/*"]
     }
   ],
@@ -41,8 +31,8 @@
     "default_title": "LeetTracker Sync"
   },
   "icons": {
-    "16": "icon16.png",
-    "48": "icon48.png",
-    "128": "icon128.png"
+    "16": "assets/images/icon16.png",
+    "48": "assets/images/icon48.png",
+    "128": "assets/images/icon128.png"
   }
 }
