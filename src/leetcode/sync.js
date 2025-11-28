@@ -489,7 +489,7 @@ export async function syncSubmissions(username) {
   );
 
   const CRITICAL_THRESHOLD_MS = HEARTBEAT_TIMEOUT_MS - 15000;
-  const ENRICHMENT_CUTOFF_DAYS = 30;
+  const ENRICHMENT_CUTOFF_DAYS = 90;
   const ENRICHMENT_CUTOFF_TIMESTAMP =
     Math.floor(Date.now() / 1000) - ENRICHMENT_CUTOFF_DAYS * 24 * 60 * 60;
 
