@@ -48,17 +48,32 @@ class AnalyticsClient {
     this.retryCount = 0;
     this.nextFlushTime = null;
 
-    this.init();
+    // Initialization state
+    this.initialized = false;
   }
 
   async init() {
-    // Load queue from storage (in case of crash/restart)
+    if (this.initialized) {
+      return; // Prevent double initialization
+    }
+
+    // Load queue from storage and merge with any events already queued during startup
     try {
       const stored = await store.get(STORAGE_KEY_QUEUE);
       if (stored && Array.isArray(stored)) {
-        this.queue = stored;
+        // Merge stored queue with in-memory queue, deduplicating by UUID
+        const existingUUIDs = new Set(this.queue.map((e) => e.uuid));
+        const uniqueStored = stored.filter((e) => !existingUUIDs.has(e.uuid));
+
+        // Prepend stored events to maintain order (stored are older)
+        this.queue = [...uniqueStored, ...this.queue];
+
         console.log(
-          `[LeetTracker][Analytics] Loaded ${this.queue.length} queued events from storage`
+          `[LeetTracker][Analytics] Loaded ${
+            uniqueStored.length
+          } queued events from storage, merged with ${
+            this.queue.length - uniqueStored.length
+          } in-memory events`
         );
       }
     } catch (error) {
@@ -101,6 +116,8 @@ class AnalyticsClient {
         this.flush();
       });
     }
+
+    this.initialized = true;
   }
 
   generateSessionId() {
@@ -678,26 +695,58 @@ class AnalyticsClient {
 
 // Singleton instance
 let analyticsInstance = null;
+let initPromise = null;
 
 /**
  * Initialize analytics client (call once on startup)
+ * Must be awaited to ensure proper initialization before use
+ *
+ * @returns {Promise<AnalyticsClient>} Initialized analytics client
  */
-export function initAnalytics() {
-  if (!analyticsInstance) {
-    analyticsInstance = new AnalyticsClient();
+export async function initAnalytics() {
+  if (analyticsInstance) {
+    return analyticsInstance;
   }
-  return analyticsInstance;
+
+  // If initialization is already in progress, return the same promise
+  if (initPromise) {
+    return initPromise;
+  }
+
+  // Start initialization
+  initPromise = (async () => {
+    analyticsInstance = new AnalyticsClient();
+    await analyticsInstance.init();
+    return analyticsInstance;
+  })();
+
+  return initPromise;
 }
 
 /**
  * Get analytics client instance
+ * Note: Should only be called after initAnalytics() has completed
+ * If called before initialization, will trigger lazy initialization
  */
 export function getAnalytics() {
   if (!analyticsInstance) {
     console.warn(
-      "[LeetTracker][Analytics] Analytics not initialized, initializing now..."
+      "[LeetTracker][Analytics] Analytics not initialized, lazy initializing (this may cause race conditions)..."
     );
+    // Trigger lazy initialization but don't wait
+    // This maintains backward compatibility but logs a warning
+    initAnalytics().catch((error) => {
+      console.error(
+        "[LeetTracker][Analytics] Lazy initialization failed:",
+        error
+      );
+    });
+    // Return a temporary instance for immediate use
     analyticsInstance = new AnalyticsClient();
+    // Start init in background
+    analyticsInstance.init().catch((error) => {
+      console.error("[LeetTracker][Analytics] Background init failed:", error);
+    });
   }
   return analyticsInstance;
 }

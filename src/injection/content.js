@@ -15,8 +15,10 @@ import { getExtensionVersion } from "../core/utils.js";
 // Initialize IndexedDB singleton on load
 getDBInstance();
 
-// Initialize analytics on load
-initAnalytics();
+// Initialize analytics on load (async but don't block)
+initAnalytics().catch((error) => {
+  console.error("[LeetTracker] Failed to initialize analytics:", error);
+});
 
 function trySyncIfLoggedIn() {
   const SELECTOR = '[data-e2e-locator="console-submit-button"]';
