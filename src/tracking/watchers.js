@@ -4,6 +4,7 @@ import { syncSubmissions } from "../leetcode/sync.js";
 import { getCurrentProblemSlug } from "../leetcode/database.js";
 import { getCurrentCode, takeCodeSnapshot } from "./snapshots.js";
 import { getDBInstance } from "../core/db-instance.js";
+import { getAnalytics } from "../core/analytics.js";
 
 const { DAY_S } = consts;
 const { visitLog: getVisitLogKey } = keys;
@@ -29,14 +30,24 @@ export async function recordProblemVisit(username, slug) {
  * Uses a data attribute to avoid double-binding.
  */
 export function hookSubmitButton(username) {
+  const analytics = getAnalytics();
   const selector = '[data-e2e-locator="console-submit-button"]';
   const button = document.querySelector(selector);
-  if (!button) return;
+
+  if (!button) {
+    analytics.captureIntegrationWarning("submit_button", "selector_not_found", {
+      selector,
+      pathname: window.location.pathname,
+    });
+    return;
+  }
 
   if (button.dataset.leettrackerHooked === "true") return;
 
   button.addEventListener("click", () => {
     console.log("[LeetTracker] Submit clicked — scheduling sync...");
+    analytics.capture("submit_button_clicked", { username });
+
     // Give LC a moment to process the submission and update their data
     setTimeout(() => {
       syncSubmissions(username).catch((e) => {
@@ -57,6 +68,7 @@ let navWatcherInterval = null;
  * The snapshot logic itself is idempotent and cheap when nothing changed.
  */
 export function startCodeSnapshotWatcher(username) {
+  const analytics = getAnalytics();
   if (codeSnapshotInterval) return; // already running
 
   codeSnapshotInterval = setInterval(async () => {
@@ -68,15 +80,46 @@ export function startCodeSnapshotWatcher(username) {
         (window.location.pathname.match(/^\/problems\/([^\/]+)\/?/) || [])[1] ||
         null;
 
-      if (!slug) return;
+      if (!slug) {
+        analytics.captureIntegrationWarning(
+          "code_snapshot",
+          "slug_not_found",
+          {
+            pathname: window.location.pathname,
+          },
+          { throttle: true }
+        );
+        return;
+      }
 
       // Acquire latest code (prefers LeetCode IndexedDB; falls back to textareas)
       const codeResult = await getCurrentCode();
-      if (!codeResult || !codeResult.bestGuess) return;
+      if (!codeResult || !codeResult.bestGuess) {
+        analytics.captureIntegrationWarning(
+          "code_snapshot",
+          "editor_access_failed",
+          {
+            slug,
+            has_result: !!codeResult,
+            pathname: window.location.pathname,
+          },
+          { throttle: true }
+        );
+        return;
+      }
 
       // This will internally check thresholds and store efficiently
       await takeCodeSnapshot(username, slug);
     } catch (e) {
+      analytics.captureError(
+        "code_snapshot_watcher_error",
+        e,
+        {
+          username,
+          pathname: window.location.pathname,
+        },
+        { throttle: true }
+      );
       // Keep watcher resilient
     }
   }, 1000);
@@ -86,6 +129,7 @@ export function startCodeSnapshotWatcher(username) {
  * Watch for problem slug changes and record recent visits for solve-window derivation.
  */
 export function startProblemNavigationWatcher(username) {
+  const analytics = getAnalytics();
   if (navWatcherInterval) return; // already running
 
   let lastSlug = null;
@@ -96,10 +140,20 @@ export function startProblemNavigationWatcher(username) {
 
       const slug = m[1];
       if (slug && slug !== lastSlug) {
+        const previousSlug = lastSlug;
         lastSlug = slug;
         recordProblemVisit(username, slug);
+        analytics.capture("problem_navigation", {
+          username,
+          slug,
+          from_slug: previousSlug,
+        });
       }
     } catch (e) {
+      analytics.captureError("navigation_watcher_error", e, {
+        username,
+        pathname: window.location.pathname,
+      });
       // Keep watcher resilient
     }
   }, 1000);
@@ -160,13 +214,24 @@ export function injectRunCodeWatcher() {
       s.type = "text/javascript";
       s.onload = () => s.remove();
       s.onerror = (e) => {
+        const analytics = getAnalytics();
         console.error("[LeetTracker] Failed to load injection/page.js:", e);
+        analytics.captureIntegrationWarning(
+          "run_code_injection",
+          "script_load_failed",
+          { url, error: e?.message || String(e) }
+        );
       };
 
       (document.head || document.documentElement).appendChild(s);
       console.log("[LeetTracker] injection/page.js injected:", url);
     } catch (e) {
+      const analytics = getAnalytics();
       console.error("[LeetTracker] injectRunCodeWatcher failed:", e);
+      analytics.captureError("run_code_injection_error", e, {
+        pathname: window.location.pathname,
+        readyState: document.readyState,
+      });
     }
   };
 
@@ -242,9 +307,29 @@ export function startRunCodeMessageBridge(username) {
                 runRecord.totalTestcases ?? "?"
               } correct, ${runRecord.statusMsg}`
           );
+
+          const analytics = getAnalytics();
+          analytics.capture("run_code_tracked", {
+            username,
+            problem_slug: problemSlug,
+            state: runRecord.state,
+            status_msg: runRecord.statusMsg,
+            test_cases_passed: runRecord.totalCorrect,
+            total_test_cases: runRecord.totalTestcases,
+            lang: runRecord.lang,
+            has_runtime_error: !!(
+              runRecord.runtimeError || runRecord.fullRuntimeError
+            ),
+          });
         }
       } catch (e) {
+        const analytics = getAnalytics();
         console.warn("[LeetTracker] Failed to handle lt-run-result:", e);
+        analytics.captureError("run_code_bridge_error", e, {
+          username,
+          pathname: window.location.pathname,
+          interpret_id: d?.payload?.interpret_id,
+        });
       }
     }
   });

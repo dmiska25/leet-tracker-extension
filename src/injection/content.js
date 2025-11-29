@@ -9,9 +9,14 @@ import {
   startRunCodeMessageBridge,
 } from "../tracking/watchers.js";
 import { getDBInstance } from "../core/db-instance.js";
+import { initAnalytics, getAnalytics } from "../core/analytics.js";
+import { getExtensionVersion } from "../core/utils.js";
 
 // Initialize IndexedDB singleton on load
 getDBInstance();
+
+// Initialize analytics on load
+initAnalytics();
 
 function trySyncIfLoggedIn() {
   const SELECTOR = '[data-e2e-locator="console-submit-button"]';
@@ -20,9 +25,24 @@ function trySyncIfLoggedIn() {
   // When a user logs in, currently, leetcode resets the page and
   // we reload this entire script anyway so we don't need to retry
   // forever.
-  getUserInfoWithCache().then(({ userId, username }) => {
+  getUserInfoWithCache().then(async ({ userId, username }) => {
+    const analytics = getAnalytics();
+
     if (username && userId) {
       console.log(`[LeetTracker] Detected login as ${username}, starting.`);
+
+      // Identify user with PostHog (safe to call multiple times)
+      await analytics.identify(username, {
+        leetcode_user_id: userId,
+        extension_version: getExtensionVersion(),
+      });
+
+      // Capture extension session started
+      analytics.capture("extension_session_started", {
+        page: window.location.pathname,
+        referrer: document.referrer,
+      });
+
       syncSubmissions(username);
       setInterval(() => {
         syncSubmissions(username);
@@ -45,6 +65,11 @@ function trySyncIfLoggedIn() {
       return true;
     } else {
       console.log("[LeetTracker] Not logged in, exiting.");
+
+      // Track anonymous session
+      analytics.capture("extension_session_started_anonymous", {
+        page: window.location.pathname,
+      });
     }
     return false;
   });

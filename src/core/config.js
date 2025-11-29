@@ -31,6 +31,11 @@ export const store = {
       chrome.storage.local.set({ [key]: value }, resolve);
     });
   },
+  async remove(keys) {
+    return new Promise((resolve) => {
+      chrome.storage.local.remove(keys, resolve);
+    });
+  },
 };
 
 // ---- tiny utils
