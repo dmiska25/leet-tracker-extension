@@ -125,10 +125,12 @@ export async function detectCurrentLanguage(code, problemSlug = null) {
       : null;
     if (problemId && userId) {
       let lang = getSelectedLanguageForProblem(problemId, userId);
-      if (lang.startsWith('"') && lang.endsWith('"')) {
-        lang = JSON.parse(lang);
+      if (lang) {
+        if (lang.startsWith('"') && lang.endsWith('"')) {
+          lang = JSON.parse(lang);
+        }
+        return lang;
       }
-      if (lang) return lang;
     }
   } catch {
     // continue to fallback

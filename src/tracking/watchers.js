@@ -39,11 +39,9 @@ export function hookSubmitButton(username) {
     console.log("[LeetTracker] Submit clicked — scheduling sync...");
     // Give LC a moment to process the submission and update their data
     setTimeout(() => {
-      try {
-        syncSubmissions(username);
-      } catch (e) {
+      syncSubmissions(username).catch((e) => {
         console.warn("[LeetTracker] syncSubmissions failed after submit:", e);
-      }
+      });
     }, 5000);
   });
 
@@ -149,7 +147,7 @@ export function injectRunCodeWatcher() {
       }
 
       // Ensure DOM is available
-      if (!document.documentElement && !document.head) {
+      if (!document.documentElement || !document.head) {
         console.warn(
           "[LeetTracker] injectRunCodeWatcher: DOM not ready, deferring"
         );
@@ -162,11 +160,11 @@ export function injectRunCodeWatcher() {
       s.type = "text/javascript";
       s.onload = () => s.remove();
       s.onerror = (e) => {
-        console.error("[LeetTracker] Failed to load page-inject.js:", e);
+        console.error("[LeetTracker] Failed to load injection/page.js:", e);
       };
 
       (document.head || document.documentElement).appendChild(s);
-      console.log("[LeetTracker] page-inject.js injected:", url);
+      console.log("[LeetTracker] injection/page.js injected:", url);
     } catch (e) {
       console.error("[LeetTracker] injectRunCodeWatcher failed:", e);
     }
@@ -183,7 +181,7 @@ export function injectRunCodeWatcher() {
 }
 
 /**
- * Bridge page-context messages (posted by page-inject.js) back into the extension,
+ * Bridge page-context messages (posted by injection/page.js) back into the extension,
  * and persist "Run Code" events into IndexedDB for later grouping with submissions.
  */
 export function startRunCodeMessageBridge(username) {

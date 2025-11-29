@@ -1,4 +1,4 @@
-// page-inject.js
+// page.js
 (() => {
   if (window.__leettrackerRunCodePatched) return;
   window.__leettrackerRunCodePatched = true;

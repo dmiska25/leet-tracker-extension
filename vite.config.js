@@ -10,7 +10,7 @@ export default defineConfig({
     sourcemap: true, // Enable source maps for debugging
     rollupOptions: {
       input: {
-        // inject_webapp and page-inject need to be separate (not bundled with content)
+        // injection/webapp.js and injection/page.js need to be separate (not bundled with content)
         inject_webapp: "src/injection/webapp.js",
         page_inject: "src/injection/page.js",
       },

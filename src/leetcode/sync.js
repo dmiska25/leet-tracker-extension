@@ -124,8 +124,8 @@ export async function buildRunEventsForSubmission(
 
   return {
     count: runs.length,
-    firstRun: runs[0].timestamp,
-    lastRun: runs[runs.length - 1].timestamp,
+    firstRun: runs[0].startedAt || runs[0].timestamp,
+    lastRun: runs[runs.length - 1].startedAt || runs[runs.length - 1].timestamp,
     hasDetailedRuns: true,
     runs: summarized,
     _window: { startMs, endMs },
@@ -185,11 +185,10 @@ export async function storeRecentRunGroup(username, submission, runEvents) {
 
   await saveToStorage(key, recent);
 
+  const original = submission.runEvents;
   try {
-    const original = submission.runEvents;
     submission.runEvents = runEvents;
     await (await getDBInstance()).storeRunGroupArchive(username, submission);
-    submission.runEvents = original;
     console.log(
       `[LeetTracker] Archived run group for ${submission.titleSlug} (submission ${submission.id})`
     );
@@ -198,6 +197,8 @@ export async function storeRecentRunGroup(username, submission, runEvents) {
       "[LeetTracker] Failed to archive run group to IndexedDB:",
       error
     );
+  } finally {
+    submission.runEvents = original;
   }
 
   console.log(
