@@ -138,18 +138,50 @@ class AnalyticsClient {
 
     try {
       // Hash username to match webapp
-      const distinctId = await sha256(username);
+      const newDistinctId = await sha256(username);
 
-      // Store for future use
-      this.currentDistinctId = distinctId;
-      await store.set(STORAGE_KEY_USER_ID, distinctId);
+      // Check if already identified with this ID
+      if (this.currentDistinctId === newDistinctId && this.identified) {
+        console.log("[Analytics] User already identified, skipping");
+        return;
+      }
+
+      // Get the old anonymous ID (if exists) for aliasing
+      const oldDistinctId =
+        this.currentDistinctId || (await this.getDistinctId());
+
+      // Send $alias event to link anonymous ID to identified ID
+      // This must be sent BEFORE we update currentDistinctId
+      if (
+        oldDistinctId !== newDistinctId &&
+        oldDistinctId.startsWith("anon_")
+      ) {
+        await this.enqueue({
+          event: "$create_alias",
+          distinct_id: newDistinctId,
+          properties: {
+            alias: oldDistinctId,
+            $anon_distinct_id: oldDistinctId,
+          },
+        });
+        console.log(
+          `[Analytics] Aliasing ${oldDistinctId.substring(
+            0,
+            20
+          )}... to ${newDistinctId.substring(0, 8)}...`
+        );
+      }
+
+      // NOW update the distinct ID
+      this.currentDistinctId = newDistinctId;
+      await store.set(STORAGE_KEY_USER_ID, newDistinctId);
       await store.set(STORAGE_KEY_IDENTIFIED, true);
       this.identified = true;
 
-      // Send $identify event to PostHog
+      // Send $identify event to PostHog with user properties
       await this.enqueue({
         event: "$identify",
-        distinct_id: distinctId,
+        distinct_id: newDistinctId,
         properties: {
           $set: {
             username: username,
@@ -164,7 +196,7 @@ class AnalyticsClient {
       });
 
       console.log(
-        `[Analytics] Identified user: ${username} (hashed: ${distinctId.substring(
+        `[Analytics] Identified user: ${username} (hashed: ${newDistinctId.substring(
           0,
           8
         )}...)`
