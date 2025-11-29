@@ -79,6 +79,54 @@ class AnalyticsClient {
   }
 
   /**
+   * Get browser name from user agent
+   */
+  _getBrowserName() {
+    if (typeof navigator === "undefined") return "Unknown";
+    const ua = navigator.userAgent;
+    if (ua.includes("Edg")) return "Edge";
+    if (ua.includes("Chrome")) return "Chrome";
+    if (ua.includes("Firefox")) return "Firefox";
+    if (ua.includes("Safari")) return "Safari";
+    return "Unknown";
+  }
+
+  /**
+   * Get browser version from user agent
+   */
+  _getBrowserVersion() {
+    if (typeof navigator === "undefined") return null;
+    const ua = navigator.userAgent;
+    let match;
+
+    if (ua.includes("Edg/")) {
+      match = ua.match(/Edg\/(\d+)/);
+    } else if (ua.includes("Chrome/")) {
+      match = ua.match(/Chrome\/(\d+)/);
+    } else if (ua.includes("Firefox/")) {
+      match = ua.match(/Firefox\/(\d+)/);
+    } else if (ua.includes("Version/") && ua.includes("Safari")) {
+      match = ua.match(/Version\/(\d+)/);
+    }
+
+    return match ? parseInt(match[1]) : null;
+  }
+
+  /**
+   * Get operating system from user agent
+   */
+  _getOS() {
+    if (typeof navigator === "undefined") return "Unknown";
+    const ua = navigator.userAgent;
+
+    if (ua.includes("Win")) return "Windows";
+    if (ua.includes("Mac")) return "Mac OS X";
+    if (ua.includes("Linux")) return "Linux";
+    if (ua.includes("CrOS")) return "Chrome OS";
+    return "Unknown";
+  }
+
+  /**
    * Identify a user. This should be called when user logs into LeetCode.
    * Safe to call multiple times - PostHog handles it gracefully.
    *
@@ -169,8 +217,46 @@ class AnalyticsClient {
           source: "chrome_extension",
           extension_version: getExtensionVersion(),
           session_id: this.sessionId,
+
+          // URL properties (matching PostHog JS SDK)
           $current_url:
             typeof window !== "undefined" ? window.location.href : undefined,
+          $host:
+            typeof window !== "undefined" ? window.location.host : undefined,
+          $pathname:
+            typeof window !== "undefined"
+              ? window.location.pathname
+              : undefined,
+
+          // Browser/Device properties
+          $browser: this._getBrowserName(),
+          $browser_version: this._getBrowserVersion(),
+          $os: this._getOS(),
+          $device_type: "Desktop", // Extensions are desktop-only
+
+          // Screen properties
+          $screen_height:
+            typeof window !== "undefined" ? window.screen.height : undefined,
+          $screen_width:
+            typeof window !== "undefined" ? window.screen.width : undefined,
+          $viewport_height:
+            typeof window !== "undefined" ? window.innerHeight : undefined,
+          $viewport_width:
+            typeof window !== "undefined" ? window.innerWidth : undefined,
+
+          // Referrer (for navigation tracking)
+          $referrer:
+            typeof document !== "undefined"
+              ? document.referrer || "$direct"
+              : "$direct",
+
+          // Timezone
+          $timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          $timezone_offset: new Date().getTimezoneOffset(),
+
+          // Language
+          $browser_language: navigator.language,
+          $browser_language_prefix: navigator.language?.split("-")[0],
         },
         timestamp: new Date().toISOString(),
       });
