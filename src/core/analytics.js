@@ -703,6 +703,7 @@ class AnalyticsClient {
 // Singleton instance
 let analyticsInstance = null;
 let initPromise = null;
+let proxyInstance = null;
 
 /**
  * Initialize analytics client (call once on startup)
@@ -732,30 +733,97 @@ export async function initAnalytics() {
 
 /**
  * Get analytics client instance
- * Note: Should only be called after initAnalytics() has completed
- * If called before initialization, will trigger lazy initialization
+ * Returns a proxy that queues calls until initialization completes
+ * This ensures all operations happen on a fully-initialized client
+ *
+ * @returns {AnalyticsClient} Analytics client (or proxy if not yet initialized)
  */
 export function getAnalytics() {
-  if (!analyticsInstance) {
-    console.warn(
-      "[LeetTracker][Analytics] Analytics not initialized, lazy initializing (this may cause race conditions)..."
-    );
-    // Trigger lazy initialization but don't wait
-    // This maintains backward compatibility but logs a warning
-    initAnalytics().catch((error) => {
-      console.error(
-        "[LeetTracker][Analytics] Lazy initialization failed:",
-        error
-      );
-    });
-    // Return a temporary instance for immediate use
-    analyticsInstance = new AnalyticsClient();
-    // Start init in background
-    analyticsInstance.init().catch((error) => {
-      console.error("[LeetTracker][Analytics] Background init failed:", error);
-    });
+  // If already initialized, return the real instance
+  if (analyticsInstance) {
+    return analyticsInstance;
   }
-  return analyticsInstance;
+
+  // If proxy already created, return it
+  if (proxyInstance) {
+    return proxyInstance;
+  }
+
+  // Create a queue for operations called before initialization
+  const operationQueue = [];
+  let isInitializing = false;
+
+  // Start initialization if not already in progress
+  if (!initPromise && !isInitializing) {
+    isInitializing = true;
+    console.log(
+      "[LeetTracker][Analytics] Analytics not initialized, starting initialization..."
+    );
+    initAnalytics()
+      .then(() => {
+        // Replay queued operations on the real instance
+        if (operationQueue.length > 0) {
+          console.log(
+            `[LeetTracker][Analytics] Replaying ${operationQueue.length} queued operations`
+          );
+          operationQueue.forEach(({ method, args, resolve, reject }) => {
+            try {
+              const result = analyticsInstance[method](...args);
+              // Handle both sync and async methods
+              if (result && typeof result.then === "function") {
+                result.then(resolve).catch(reject);
+              } else {
+                resolve(result);
+              }
+            } catch (error) {
+              reject(error);
+            }
+          });
+          operationQueue.length = 0; // Clear the queue
+        }
+      })
+      .catch((error) => {
+        console.error("[LeetTracker][Analytics] Initialization failed:", error);
+        // Reject all queued operations
+        operationQueue.forEach(({ reject }) => {
+          reject(new Error("Analytics initialization failed"));
+        });
+        operationQueue.length = 0;
+      });
+  }
+
+  // Create a proxy that queues method calls until initialization completes
+  proxyInstance = new Proxy(
+    {},
+    {
+      get(_target, prop) {
+        // If already initialized, delegate to real instance
+        if (analyticsInstance) {
+          return analyticsInstance[prop];
+        }
+
+        // For method calls, queue them
+        if (typeof AnalyticsClient.prototype[prop] === "function") {
+          return function (...args) {
+            // If initialized by the time method is called, use real instance
+            if (analyticsInstance) {
+              return analyticsInstance[prop](...args);
+            }
+
+            // Otherwise, queue the operation and return a promise
+            return new Promise((resolve, reject) => {
+              operationQueue.push({ method: prop, args, resolve, reject });
+            });
+          };
+        }
+
+        // For property access, return undefined or a safe default
+        return undefined;
+      },
+    }
+  );
+
+  return proxyInstance;
 }
 
 /**
