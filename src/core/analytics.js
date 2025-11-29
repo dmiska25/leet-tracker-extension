@@ -21,10 +21,15 @@ const BATCH_ENDPOINT = "/capture/";
 
 const FLUSH_INTERVAL = 30000; // 30 seconds
 const MAX_QUEUE_SIZE = 50; // Flush when queue reaches this size
+const MAX_QUEUE_CAPACITY = 1000; // Maximum events to keep in queue (prevent unbounded growth)
+const BASE_BACKOFF_MS = 5000; // 5 seconds initial backoff
+const MAX_BACKOFF_MS = 300000; // 5 minutes max backoff
 const STORAGE_KEY_QUEUE = "leettracker_analytics_queue";
 const STORAGE_KEY_USER_ID = "leettracker_analytics_user_id";
 const STORAGE_KEY_ANON_ID = "leettracker_analytics_anon_id";
 const STORAGE_KEY_IDENTIFIED = "leettracker_analytics_identified";
+const STORAGE_KEY_RETRY_COUNT = "leettracker_analytics_retry_count";
+const STORAGE_KEY_NEXT_FLUSH = "leettracker_analytics_next_flush";
 
 class AnalyticsClient {
   constructor() {
@@ -38,6 +43,10 @@ class AnalyticsClient {
     // Event throttling: track last time each event type was sent
     this.throttleMap = new Map(); // eventName -> timestamp
     this.throttleDuration = 60000; // 60 seconds default
+
+    // Exponential backoff for flush retries
+    this.retryCount = 0;
+    this.nextFlushTime = null;
 
     this.init();
   }
@@ -55,6 +64,23 @@ class AnalyticsClient {
     } catch (error) {
       console.error(
         "[LeetTracker][Analytics] Failed to load queue from storage:",
+        error
+      );
+    }
+
+    // Load retry state from storage
+    try {
+      const retryCount = await store.get(STORAGE_KEY_RETRY_COUNT);
+      const nextFlushTime = await store.get(STORAGE_KEY_NEXT_FLUSH);
+      if (typeof retryCount === "number") {
+        this.retryCount = retryCount;
+      }
+      if (typeof nextFlushTime === "number") {
+        this.nextFlushTime = nextFlushTime;
+      }
+    } catch (error) {
+      console.error(
+        "[LeetTracker][Analytics] Failed to load retry state from storage:",
         error
       );
     }
@@ -418,6 +444,16 @@ class AnalyticsClient {
 
     this.queue.push(event);
 
+    // Enforce maximum queue capacity to prevent unbounded growth
+    // Drop oldest events if queue exceeds capacity (FIFO)
+    if (this.queue.length > MAX_QUEUE_CAPACITY) {
+      const dropped = this.queue.length - MAX_QUEUE_CAPACITY;
+      this.queue = this.queue.slice(-MAX_QUEUE_CAPACITY);
+      console.warn(
+        `[LeetTracker][Analytics] Queue exceeded capacity, dropped ${dropped} oldest events`
+      );
+    }
+
     // Persist queue to storage
     try {
       await store.set(STORAGE_KEY_QUEUE, this.queue);
@@ -433,6 +469,16 @@ class AnalyticsClient {
 
   async flush() {
     if (this.queue.length === 0) return;
+
+    // Check if we're in backoff period
+    const now = Date.now();
+    if (this.nextFlushTime && now < this.nextFlushTime) {
+      const waitTime = Math.ceil((this.nextFlushTime - now) / 1000);
+      console.log(
+        `[LeetTracker][Analytics] Flush delayed due to backoff, retry in ${waitTime}s`
+      );
+      return;
+    }
 
     const batch = [...this.queue];
     this.queue = [];
@@ -472,29 +518,105 @@ class AnalyticsClient {
           response.status,
           response.statusText
         );
-        // Re-queue failed events (prepend to maintain order)
-        this.queue.unshift(...batch);
-        await store.set(STORAGE_KEY_QUEUE, this.queue);
+        // Re-queue failed events with backoff
+        await this.handleFlushFailure(batch);
       } else {
         console.log(
           `[LeetTracker][Analytics] Flushed ${batch.length} events to PostHog`
         );
+        // Reset backoff on success
+        await this.resetBackoff();
       }
     } catch (error) {
       console.error(
         "[LeetTracker][Analytics] Network error while sending events:",
         error
       );
-      // Re-queue failed events
-      this.queue.unshift(...batch);
-      try {
-        await store.set(STORAGE_KEY_QUEUE, this.queue);
-      } catch (storeError) {
-        console.error(
-          "[LeetTracker][Analytics] Failed to re-queue events:",
-          storeError
-        );
-      }
+      // Re-queue failed events with backoff
+      await this.handleFlushFailure(batch);
+    }
+  }
+
+  /**
+   * Handle flush failure by re-queuing events with capacity limit and applying backoff
+   * Drops oldest events if re-queuing would exceed MAX_QUEUE_CAPACITY
+   *
+   * @param {Array} batch - The batch of events that failed to send
+   */
+  async handleFlushFailure(batch) {
+    // Re-queue failed events (prepend to maintain order)
+    this.queue.unshift(...batch);
+
+    // Enforce maximum queue capacity - drop oldest events (from the beginning) if exceeded
+    if (this.queue.length > MAX_QUEUE_CAPACITY) {
+      const dropped = this.queue.length - MAX_QUEUE_CAPACITY;
+      this.queue = this.queue.slice(-MAX_QUEUE_CAPACITY);
+      console.warn(
+        `[LeetTracker][Analytics] Queue exceeded capacity after re-queue, dropped ${dropped} oldest events`
+      );
+    }
+
+    // Persist trimmed queue
+    try {
+      await store.set(STORAGE_KEY_QUEUE, this.queue);
+    } catch (storeError) {
+      console.error(
+        "[LeetTracker][Analytics] Failed to persist queue after failure:",
+        storeError
+      );
+    }
+
+    // Apply exponential backoff
+    this.retryCount++;
+    const backoffDelay = Math.min(
+      MAX_BACKOFF_MS,
+      BASE_BACKOFF_MS * Math.pow(2, this.retryCount - 1)
+    );
+    this.nextFlushTime = Date.now() + backoffDelay;
+
+    console.warn(
+      `[LeetTracker][Analytics] Flush failed, retry ${
+        this.retryCount
+      }, backing off ${Math.ceil(backoffDelay / 1000)}s`
+    );
+
+    // Persist retry state
+    try {
+      await store.set(STORAGE_KEY_RETRY_COUNT, this.retryCount);
+      await store.set(STORAGE_KEY_NEXT_FLUSH, this.nextFlushTime);
+    } catch (error) {
+      console.error(
+        "[LeetTracker][Analytics] Failed to persist retry state:",
+        error
+      );
+    }
+
+    // Schedule next flush attempt after backoff delay
+    setTimeout(() => {
+      this.flush();
+    }, backoffDelay);
+  }
+
+  /**
+   * Reset backoff state after successful flush
+   */
+  async resetBackoff() {
+    if (this.retryCount > 0) {
+      console.log(
+        `[LeetTracker][Analytics] Flush successful, resetting backoff (was retry ${this.retryCount})`
+      );
+    }
+    this.retryCount = 0;
+    this.nextFlushTime = null;
+
+    // Clear retry state from storage
+    try {
+      await store.remove([STORAGE_KEY_RETRY_COUNT, STORAGE_KEY_NEXT_FLUSH]);
+    } catch (error) {
+      console.error(
+        "[LeetTracker][Analytics] Failed to clear retry state:",
+        error
+      );
     }
   }
 
