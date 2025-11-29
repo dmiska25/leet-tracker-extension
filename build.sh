@@ -16,6 +16,10 @@ cp inject_webapp.js build/src/
 cp page-inject.js build/src/
 cp *.png build/src/
 
+# Copy extension source modules (e.g., lt-global.js, lt-db.js, etc.)
+echo "📁 Copying src/ modules..."
+cp -R src/* build/src/ 2>/dev/null || true
+
 # Copy appropriate manifest to src folder based on build type
 if [ "$BUILD_TYPE" = "prod" ]; then
     echo "📄 Using production manifest..."

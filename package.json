@@ -2,18 +2,25 @@
   "name": "leet-tracker-extension",
   "version": "0.1.1",
   "description": "Companion Chrome extension for LeetTracker, a LeetCode progress tracker.",
+  "type": "module",
   "scripts": {
-    "build": "./build.sh dev",
-    "build:zip": "./build.sh dev --zip",
-    "build:prod": "./build.sh prod",
-    "build:prod:zip": "./build.sh prod --zip",
-    "build:prod:version": "./build.sh prod --version-bump --zip",
-    "clean": "rm -rf build && echo 'Build artifacts cleaned'"
+    "dev": "vite build --watch --mode development",
+    "build": "vite build --mode development",
+    "build:prod": "vite build --mode production --config vite.config.prod.js",
+    "clean": "rm -rf build && echo 'Build artifacts cleaned'",
+    "zip": "cd build && zip -r leet-tracker-extension.zip . -x '*.DS_Store' '.vite/*' && cd .. && echo '✅ Created build/leet-tracker-extension.zip'",
+    "build:prod:zip": "npm run build:prod && npm run zip"
   },
   "repository": {
     "type": "git",
     "url": "https://github.com/dmiska25/leet-tracker-extension.git"
   },
   "author": "Dylan Miska",
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "@crxjs/vite-plugin": "^2.2.1",
+    "diff-match-patch": "^1.0.5",
+    "terser": "^5.44.0",
+    "vite": "^7.1.12"
+  }
 }
