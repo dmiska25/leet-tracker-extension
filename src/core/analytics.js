@@ -49,11 +49,14 @@ class AnalyticsClient {
       if (stored && Array.isArray(stored)) {
         this.queue = stored;
         console.log(
-          `[Analytics] Loaded ${this.queue.length} queued events from storage`
+          `[LeetTracker][Analytics] Loaded ${this.queue.length} queued events from storage`
         );
       }
     } catch (error) {
-      console.error("[Analytics] Failed to load queue from storage:", error);
+      console.error(
+        "[LeetTracker][Analytics] Failed to load queue from storage:",
+        error
+      );
     }
 
     // Load current distinct_id
@@ -142,7 +145,9 @@ class AnalyticsClient {
 
       // Check if already identified with this ID
       if (this.currentDistinctId === newDistinctId && this.identified) {
-        console.log("[Analytics] User already identified, skipping");
+        console.log(
+          "[LeetTracker][Analytics] User already identified, skipping"
+        );
         return;
       }
 
@@ -165,7 +170,7 @@ class AnalyticsClient {
           },
         });
         console.log(
-          `[Analytics] Aliasing ${oldDistinctId.substring(
+          `[LeetTracker][Analytics] Aliasing ${oldDistinctId.substring(
             0,
             20
           )}... to ${newDistinctId.substring(0, 8)}...`
@@ -196,13 +201,13 @@ class AnalyticsClient {
       });
 
       console.log(
-        `[Analytics] Identified user: ${username} (hashed: ${newDistinctId.substring(
+        `[LeetTracker][Analytics] Identified user: ${username} (hashed: ${newDistinctId.substring(
           0,
           8
         )}...)`
       );
     } catch (error) {
-      console.error("[Analytics] Failed to identify user:", error);
+      console.error("[LeetTracker][Analytics] Failed to identify user:", error);
     }
   }
 
@@ -293,7 +298,10 @@ class AnalyticsClient {
         timestamp: new Date().toISOString(),
       });
     } catch (error) {
-      console.error(`[Analytics] Failed to capture event ${eventName}:`, error);
+      console.error(
+        `[LeetTracker][Analytics] Failed to capture event ${eventName}:`,
+        error
+      );
     }
   }
 
@@ -359,7 +367,7 @@ class AnalyticsClient {
     const now = Date.now();
     if (!lastLog || now - lastLog > 60000) {
       console.warn(
-        `[Analytics][Integration] ${integration}: ${issue}`,
+        `[LeetTracker][Analytics][Integration] ${integration}: ${issue}`,
         context
       );
       this.throttleMap.set(logKey, now);
@@ -393,10 +401,13 @@ class AnalyticsClient {
       this.currentDistinctId = newAnonId;
 
       console.log(
-        "[Analytics] User identity reset, new anonymous session started"
+        "[LeetTracker][Analytics] User identity reset, new anonymous session started"
       );
     } catch (error) {
-      console.error("[Analytics] Failed to reset identity:", error);
+      console.error(
+        "[LeetTracker][Analytics] Failed to reset identity:",
+        error
+      );
     }
   }
 
@@ -411,7 +422,7 @@ class AnalyticsClient {
     try {
       await store.set(STORAGE_KEY_QUEUE, this.queue);
     } catch (error) {
-      console.error("[Analytics] Failed to persist queue:", error);
+      console.error("[LeetTracker][Analytics] Failed to persist queue:", error);
     }
 
     // Flush if queue is full
@@ -430,7 +441,10 @@ class AnalyticsClient {
     try {
       await store.set(STORAGE_KEY_QUEUE, []);
     } catch (error) {
-      console.error("[Analytics] Failed to clear queue in storage:", error);
+      console.error(
+        "[LeetTracker][Analytics] Failed to clear queue in storage:",
+        error
+      );
     }
 
     try {
@@ -454,7 +468,7 @@ class AnalyticsClient {
 
       if (!response.ok) {
         console.error(
-          "[Analytics] Failed to send events:",
+          "[LeetTracker][Analytics] Failed to send events:",
           response.status,
           response.statusText
         );
@@ -462,16 +476,24 @@ class AnalyticsClient {
         this.queue.unshift(...batch);
         await store.set(STORAGE_KEY_QUEUE, this.queue);
       } else {
-        console.log(`[Analytics] Flushed ${batch.length} events to PostHog`);
+        console.log(
+          `[LeetTracker][Analytics] Flushed ${batch.length} events to PostHog`
+        );
       }
     } catch (error) {
-      console.error("[Analytics] Network error while sending events:", error);
+      console.error(
+        "[LeetTracker][Analytics] Network error while sending events:",
+        error
+      );
       // Re-queue failed events
       this.queue.unshift(...batch);
       try {
         await store.set(STORAGE_KEY_QUEUE, this.queue);
       } catch (storeError) {
-        console.error("[Analytics] Failed to re-queue events:", storeError);
+        console.error(
+          "[LeetTracker][Analytics] Failed to re-queue events:",
+          storeError
+        );
       }
     }
   }
@@ -528,7 +550,7 @@ class AnalyticsClient {
    */
   setEnabled(enabled) {
     this.enabled = enabled;
-    console.log(`[Analytics] ${enabled ? "Enabled" : "Disabled"}`);
+    console.log(`[LeetTracker][Analytics] ${enabled ? "Enabled" : "Disabled"}`);
   }
 }
 
@@ -550,7 +572,9 @@ export function initAnalytics() {
  */
 export function getAnalytics() {
   if (!analyticsInstance) {
-    console.warn("[Analytics] Analytics not initialized, initializing now...");
+    console.warn(
+      "[LeetTracker][Analytics] Analytics not initialized, initializing now..."
+    );
     analyticsInstance = new AnalyticsClient();
   }
   return analyticsInstance;

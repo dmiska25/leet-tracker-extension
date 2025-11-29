@@ -501,7 +501,7 @@ export async function cacheTemplatesForProblem(problemSlug) {
     }
     return templates;
   } catch (error) {
-    console.error("❌ [Template Cache] Failed to fetch templates:", error);
+    console.error("[LeetTracker][Snapshots] Failed to fetch templates:", error);
     return storageCached?.templates || [];
   }
 }
@@ -518,7 +518,7 @@ export async function checkForFreshStart(currentCode, problemSlug) {
     const similarity = calculateCodeSimilarity(template.code, currentCode);
     return similarity >= 0.98;
   } catch (error) {
-    console.error("❌ [Fresh Start] Error during check:", error);
+    console.error("[LeetTracker][Snapshots] Error during check:", error);
     return false;
   }
 }

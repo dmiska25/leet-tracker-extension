@@ -2,7 +2,7 @@
   const EXTENSION_SOURCE = "leettracker-extension";
   const WEBAPP_SOURCE = "leettracker-webapp";
 
-  console.log("[LeetTracker Inject] Webapp script loaded");
+  console.log("[LeetTracker][Webapp] Webapp script loaded");
 
   // Import analytics - need to use dynamic import for module
   let analytics = null;
@@ -11,7 +11,7 @@
       const { getAnalytics } = await import("../core/analytics.js");
       analytics = getAnalytics();
     } catch (e) {
-      console.warn("[LeetTracker Inject] Analytics not available:", e);
+      console.warn("[LeetTracker][Webapp] Analytics not available:", e);
     }
   })();
 
@@ -54,7 +54,7 @@
           "*"
         );
         console.log(
-          `[LeetTracker Inject] Manifest for ${username} since ${since} sent`
+          `[LeetTracker][Webapp] Manifest for ${username} since ${since} sent`
         );
 
         if (analytics) {
@@ -70,7 +70,7 @@
           );
         }
       } catch (e) {
-        console.error("[LeetTracker Inject] Failed to get manifest:", e);
+        console.error("[LeetTracker][Webapp] Failed to get manifest:", e);
         if (analytics) {
           analytics.captureError("webapp_bridge_error", e, {
             username,
@@ -150,7 +150,7 @@
           "*"
         );
         console.log(
-          `[LeetTracker Inject] Enhanced chunk ${index} for ${username} sent (${enhancedData.length} submissions, ${recentJourneys.length} recent journeys, ${recentRunGroups.length} recent run groups)`
+          `[LeetTracker][Webapp] Enhanced chunk ${index} for ${username} sent (${enhancedData.length} submissions, ${recentJourneys.length} recent journeys, ${recentRunGroups.length} recent run groups)`
         );
 
         if (analytics) {
@@ -171,7 +171,7 @@
         }
       } catch (e) {
         console.error(
-          `[LeetTracker Inject] Failed to get chunk ${index} for ${username}:`,
+          `[LeetTracker][Webapp] Failed to get chunk ${index} for ${username}:`,
           e
         );
         if (analytics) {
