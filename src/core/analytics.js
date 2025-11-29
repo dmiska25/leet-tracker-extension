@@ -331,12 +331,19 @@ class AnalyticsClient {
               : "$direct",
 
           // Timezone
-          $timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          $timezone:
+            typeof Intl !== "undefined"
+              ? Intl.DateTimeFormat().resolvedOptions().timeZone
+              : undefined,
           $timezone_offset: new Date().getTimezoneOffset(),
 
           // Language
-          $browser_language: navigator.language,
-          $browser_language_prefix: navigator.language?.split("-")[0],
+          $browser_language:
+            typeof navigator !== "undefined" ? navigator.language : undefined,
+          $browser_language_prefix:
+            typeof navigator !== "undefined"
+              ? navigator.language?.split("-")[0]
+              : undefined,
         },
         timestamp: new Date().toISOString(),
       });
