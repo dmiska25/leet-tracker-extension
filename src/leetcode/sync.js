@@ -490,6 +490,11 @@ export async function syncSubmissions(username) {
   const analytics = getAnalytics();
   const syncStartTime = Date.now();
 
+  // will be set after loading manifest, defined here for error reporting
+  let lastT = null;
+  let prevTotalSubs = null;
+  let isFirstSync = null;
+
   if (!(await acquireSyncLock())) {
     console.log(`[LeetTracker] Could not acquire sync lock, skipping sync`);
     analytics.capture("sync_skipped", {
@@ -510,7 +515,6 @@ export async function syncSubmissions(username) {
   const ENRICHMENT_CUTOFF_DAYS = 90;
   const ENRICHMENT_CUTOFF_TIMESTAMP =
     Math.floor(Date.now() / 1000) - ENRICHMENT_CUTOFF_DAYS * 24 * 60 * 60;
-
   try {
     const manifestKey = getManifestKey(username);
     const seenKey = getSeenProblemsKey(username);
@@ -525,9 +529,9 @@ export async function syncSubmissions(username) {
     ]);
 
     const userHasPremium = userInfo.isPremium || false;
-    const lastT = manifest.lastTimestamp || 0;
-    const prevTotalSubs = manifest.total || 0;
-    const isFirstSync = prevTotalSubs === 0;
+    lastT = manifest.lastTimestamp || 0;
+    prevTotalSubs = manifest.total || 0;
+    isFirstSync = prevTotalSubs === 0;
 
     const subs = await fetchAllSubmissions(lastT);
     const newTotalSubs = prevTotalSubs + subs.length;
