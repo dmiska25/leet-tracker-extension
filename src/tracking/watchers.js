@@ -28,8 +28,10 @@ export async function recordProblemVisit(username, slug) {
 /**
  * Wire LC "Submit" button to schedule a background sync shortly after submission.
  * Uses a data attribute to avoid double-binding.
+ * @param {string} username - The LeetCode username
+ * @param {Function} onSyncComplete - Optional callback to run after sync completes with result
  */
-export function hookSubmitButton(username) {
+export function hookSubmitButton(username, onSyncComplete) {
   const analytics = getAnalytics();
   const selector = '[data-e2e-locator="console-submit-button"]';
   const button = document.querySelector(selector);
@@ -50,9 +52,15 @@ export function hookSubmitButton(username) {
 
     // Give LC a moment to process the submission and update their data
     setTimeout(() => {
-      syncSubmissions(username).catch((e) => {
-        console.warn("[LeetTracker] syncSubmissions failed after submit:", e);
-      });
+      syncSubmissions(username)
+        .then((result) => {
+          if (onSyncComplete && typeof onSyncComplete === "function") {
+            onSyncComplete(result, username);
+          }
+        })
+        .catch((e) => {
+          console.warn("[LeetTracker] syncSubmissions failed after submit:", e);
+        });
     }, 5000);
   });
 
