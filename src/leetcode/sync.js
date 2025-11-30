@@ -501,7 +501,7 @@ export async function syncSubmissions(username) {
       username,
       reason: "lock_held_by_other_tab",
     });
-    return;
+    return { success: false, error: "lock_held" };
   }
 
   const SESSION_ID = sessionId();
@@ -565,7 +565,7 @@ export async function syncSubmissions(username) {
         manifestKey,
         seenKey
       );
-      return;
+      return { success: true, newSolves: 0, isBackfill: false };
     }
 
     let chunkIdx = manifest.chunkCount - 1 || 0;
@@ -637,6 +637,9 @@ export async function syncSubmissions(username) {
       );
     }
 
+    // Track enriched solves for toast notification
+    const enrichedSolves = [];
+
     for (let i = skippedForBackfill; i < subs.length; i++) {
       await updateSyncHeartbeatOrFail(
         `heartbeat update at submission ${i}/${subs.length}`
@@ -654,6 +657,14 @@ export async function syncSubmissions(username) {
 
       const sub = subs[i];
       await enrichSubmission(sub, seenMap, visitLog, username, userHasPremium);
+
+      // Track this solve for notification (only accepted solves)
+      if (sub.statusDisplay === "Accepted") {
+        enrichedSolves.push({
+          slug: sub.titleSlug,
+          duration: sub.solveTime || null,
+        });
+      }
 
       chunk.push(sub);
       totalSynced++;
@@ -720,6 +731,14 @@ export async function syncSubmissions(username) {
       last_sync_timestamp: lastT,
       previous_total: prevTotalSubs,
     });
+
+    // Return sync result for toast notification
+    return {
+      success: true,
+      newSolves: enrichedSolves.length,
+      isBackfill: false,
+      solves: enrichedSolves,
+    };
   } catch (e) {
     console.error("[LeetTracker] Sync failed:", e);
 
@@ -732,6 +751,8 @@ export async function syncSubmissions(username) {
       last_sync_timestamp: lastT,
       previous_total: prevTotalSubs,
     });
+
+    return { success: false, error: e.message };
   } finally {
     console.log(
       "[LeetTracker] Finished submission sync",

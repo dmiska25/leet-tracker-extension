@@ -20,6 +20,48 @@ initAnalytics().catch((error) => {
   console.error("[LeetTracker] Failed to initialize analytics:", error);
 });
 
+function showToastAfterSync(result, username) {
+  // Don't show toast if sync failed or didn't add new solves
+  if (!result || !result.success || result.newSolves === 0) {
+    return;
+  }
+
+  // Don't show toast for backfill
+  if (result.isBackfill) {
+    return;
+  }
+
+  const solves = result.solves || [];
+  const solvesCount = result.newSolves;
+
+  // LeetTracker URL (global for now until routing is set up)
+  const leetTrackerUrl = "https://leet-tracker-log.vercel.app/";
+
+  // Show the toast
+  if (
+    window.leetTrackerToast &&
+    typeof window.leetTrackerToast.showSyncToast === "function"
+  ) {
+    try {
+      window.leetTrackerToast.showSyncToast({
+        isBackfill: false,
+        solvesCount,
+        solveSlug: solvesCount === 1 ? solves[0]?.slug : undefined,
+        solveDuration: solvesCount === 1 ? solves[0]?.duration : undefined,
+        leetTrackerUrl,
+        durationMs: 5000,
+      });
+    } catch (e) {
+      console.warn("[LeetTracker] Failed to show sync toast:", e);
+      const analytics = getAnalytics();
+      analytics.captureError("toast_display_error", e, {
+        username,
+        solves_count: solvesCount,
+      });
+    }
+  }
+}
+
 function trySyncIfLoggedIn() {
   const SELECTOR = '[data-e2e-locator="console-submit-button"]';
 
@@ -45,16 +87,23 @@ function trySyncIfLoggedIn() {
         referrer: document.referrer,
       });
 
-      syncSubmissions(username);
+      // Initial sync with toast
+      syncSubmissions(username).then((result) => {
+        showToastAfterSync(result, username);
+      });
+
+      // Periodic sync with toast
       setInterval(() => {
-        syncSubmissions(username);
+        syncSubmissions(username).then((result) => {
+          showToastAfterSync(result, username);
+        });
       }, 1 * 60 * 1000);
       setInterval(() => {
         if (!window.location.pathname.startsWith("/problems/")) return;
 
         const btn = document.querySelector(SELECTOR);
         if (btn && btn.dataset.leettrackerHooked !== "true") {
-          hookSubmitButton(username);
+          hookSubmitButton(username, showToastAfterSync);
         }
       }, 5000); // 5 s poll
 

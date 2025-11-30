@@ -1,0 +1,179 @@
+/* toast.css - simple, dependency-free styles for extension toast */
+
+/* CSS variables for quick theming; override in your own CSS if desired */
+:root {
+  --toast-bg: rgba(17, 24, 39, 0.95); /* dark card */
+  --toast-fg: #ffffff;
+  --toast-accent: #10b981; /* green */
+  --toast-accent-2: #f59e0b; /* amber for warning */
+  --toast-width-clamp: 320px;
+  --toast-width-vw: 28vw;
+  --toast-offset-top: 6vh;
+  --toast-offset-right: 3vw;
+  --toast-radius: 10px;
+  --toast-padding: 14px;
+  --toast-font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+  --toast-z-index: 2147483647; /* very top */
+  --toast-shadow: 0 8px 30px rgba(2,6,23,0.6);
+}
+
+/* Container for all toasts injected by toast.js */
+.lt-toast-container {
+  position: fixed;
+  top: var(--toast-offset-top);
+  right: var(--toast-offset-right);
+  z-index: var(--toast-z-index);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: flex-end; /* stack to the right */
+  pointer-events: none; /* let clicks pass through except on children */
+}
+
+/* Individual toast */
+.lt-toast {
+  pointer-events: auto; /* enable pointer on content */
+  width: clamp(var(--toast-width-clamp), var(--toast-width-vw), 520px);
+  max-width: 92vw;
+  background: var(--toast-bg);
+  color: var(--toast-fg);
+  border-radius: var(--toast-radius);
+  box-shadow: var(--toast-shadow);
+  padding: var(--toast-padding);
+  font-family: var(--toast-font-family);
+  font-size: 13px;
+  line-height: 1.2;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  opacity: 0;
+  transform: translateY(-8px) scale(0.98);
+  transition: opacity 220ms ease, transform 220ms ease;
+}
+
+/* When visible, class .show is added by JS */
+.lt-toast.show {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+/* Header with logo, message, and close button */
+.lt-toast .lt-toast-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+/* Logo in top left */
+.lt-toast .lt-toast-logo {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 6px;
+}
+
+/* Message content */
+.lt-toast .lt-toast-message {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-width: 0; /* Allow text to wrap */
+}
+
+/* Strong heading text */
+.lt-toast .lt-toast-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--toast-fg);
+}
+
+/* Secondary text */
+.lt-toast .lt-toast-sub {
+  color: rgba(255,255,255,0.85);
+  font-size: 13px;
+}
+
+/* Action row with buttons */
+.lt-toast .lt-toast-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-left: 44px; /* Align with message content (logo width + gap) */
+}
+
+/* Link button */
+.lt-toast .lt-btn {
+  background: transparent;
+  color: var(--toast-accent);
+  border: 1px solid rgba(255,255,255,0.15);
+  padding: 8px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  text-decoration: none;
+  font-size: 13px;
+  transition: background 150ms ease, border-color 150ms ease;
+}
+
+.lt-toast .lt-btn:hover {
+  background: rgba(16, 185, 129, 0.1);
+  border-color: rgba(255,255,255,0.25);
+}
+
+/* Close button */
+.lt-toast .lt-close {
+  background: transparent;
+  border: none;
+  color: rgba(255,255,255,0.6);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  font-size: 16px;
+  line-height: 1;
+  transition: color 150ms ease, background 150ms ease;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.lt-toast .lt-close:hover {
+  color: rgba(255,255,255,0.9);
+  background: rgba(255,255,255,0.1);
+}
+
+/* Timer bar at bottom */
+.lt-toast .lt-timer {
+  height: 4px;
+  background: rgba(255,255,255,0.08);
+  border-radius: 6px;
+  overflow: hidden;
+  position: relative;
+}
+
+/* animated inner bar */
+.lt-toast .lt-timer .lt-timer-bar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 100%;
+  width: 100%;
+  background: linear-gradient(90deg, var(--toast-accent), var(--toast-accent-2));
+  transform-origin: left;
+  /* animation controlled via inline style duration or CSS animation */
+}
+
+/* small responsive tweaks */
+@media (max-width: 420px) {
+  :root {
+    --toast-offset-right: 4vw;
+    --toast-offset-top: 4vh;
+  }
+  .lt-toast {
+    padding: 12px;
+    font-size: 13px;
+  }
+}
