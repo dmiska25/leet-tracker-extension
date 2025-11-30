@@ -503,7 +503,7 @@ export async function syncSubmissions(username) {
   console.log(
     "[LeetTracker] Starting submission sync...",
     username,
-    syncStartTime.toISOString()
+    new Date().toISOString()
   );
 
   const CRITICAL_THRESHOLD_MS = HEARTBEAT_TIMEOUT_MS - 15000;

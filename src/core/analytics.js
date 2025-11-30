@@ -297,6 +297,7 @@ class AnalyticsClient {
           source: "chrome_extension",
           extension_version: getExtensionVersion(),
           session_id: this.sessionId,
+          environment: import.meta.env.MODE, // "development" or "production"
 
           // URL properties (matching PostHog JS SDK)
           $current_url:
