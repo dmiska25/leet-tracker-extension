@@ -2,7 +2,18 @@
   const EXTENSION_SOURCE = "leettracker-extension";
   const WEBAPP_SOURCE = "leettracker-webapp";
 
-  console.log("[LeetTracker Inject] Webapp script loaded");
+  console.log("[LeetTracker][Webapp] Webapp script loaded");
+
+  // Import analytics - need to use dynamic import for module
+  let analytics = null;
+  (async () => {
+    try {
+      const { getAnalytics } = await import("../core/analytics.js");
+      analytics = getAnalytics();
+    } catch (e) {
+      console.warn("[LeetTracker][Webapp] Analytics not available:", e);
+    }
+  })();
 
   window.addEventListener("message", async (event) => {
     const { source, type, username } = event.data || {};
@@ -10,6 +21,19 @@
 
     if (type === "request_chunk_manifest_since") {
       const since = event.data.since || 0;
+
+      if (analytics) {
+        analytics.capture(
+          "webapp_data_requested",
+          {
+            username,
+            request_type: "chunk_manifest",
+            since_timestamp: since,
+          },
+          { throttle: true }
+        );
+      }
+
       try {
         const manifestKey = `leettracker_sync_manifest_${username}`;
         const result = await chrome.storage.local.get([manifestKey]);
@@ -30,16 +54,47 @@
           "*"
         );
         console.log(
-          `[LeetTracker Inject] Manifest for ${username} since ${since} sent`
+          `[LeetTracker][Webapp] Manifest for ${username} since ${since} sent`
         );
+
+        if (analytics) {
+          analytics.capture(
+            "webapp_data_sent",
+            {
+              username,
+              request_type: "chunk_manifest",
+              chunks_sent: filtered.length,
+              total_submissions: result[manifestKey]?.total,
+            },
+            { throttle: true }
+          );
+        }
       } catch (e) {
-        console.error("[LeetTracker Inject] Failed to get manifest:", e);
+        console.error("[LeetTracker][Webapp] Failed to get manifest:", e);
+        if (analytics) {
+          analytics.captureError("webapp_bridge_error", e, {
+            username,
+            request_type: "chunk_manifest",
+          });
+        }
       }
     }
 
     if (type === "request_chunk_by_index") {
       const index = event.data.index;
       if (typeof index !== "number") return;
+
+      if (analytics) {
+        analytics.capture(
+          "webapp_data_requested",
+          {
+            username,
+            request_type: "chunk_by_index",
+            chunk_index: index,
+          },
+          { throttle: true }
+        );
+      }
 
       try {
         const chunkKey = `leettracker_leetcode_chunk_${username}_${index}`;
@@ -95,13 +150,37 @@
           "*"
         );
         console.log(
-          `[LeetTracker Inject] Enhanced chunk ${index} for ${username} sent (${enhancedData.length} submissions, ${recentJourneys.length} recent journeys, ${recentRunGroups.length} recent run groups)`
+          `[LeetTracker][Webapp] Enhanced chunk ${index} for ${username} sent (${enhancedData.length} submissions, ${recentJourneys.length} recent journeys, ${recentRunGroups.length} recent run groups)`
         );
+
+        if (analytics) {
+          analytics.capture(
+            "webapp_data_sent",
+            {
+              username,
+              request_type: "chunk_by_index",
+              chunk_index: index,
+              submission_count: enhancedData.length,
+              has_journeys: recentJourneys.length > 0,
+              has_runs: recentRunGroups.length > 0,
+              journeys_count: recentJourneys.length,
+              runs_count: recentRunGroups.length,
+            },
+            { throttle: true }
+          );
+        }
       } catch (e) {
         console.error(
-          `[LeetTracker Inject] Failed to get chunk ${index} for ${username}:`,
+          `[LeetTracker][Webapp] Failed to get chunk ${index} for ${username}:`,
           e
         );
+        if (analytics) {
+          analytics.captureError("webapp_bridge_error", e, {
+            username,
+            request_type: "chunk_by_index",
+            chunk_index: index,
+          });
+        }
       }
     }
   });

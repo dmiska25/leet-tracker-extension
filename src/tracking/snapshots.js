@@ -11,6 +11,7 @@ import {
 import { withSnapshotLock } from "../core/locks.js";
 import { recordProblemVisit } from "./watchers.js";
 import { getDBInstance } from "../core/db-instance.js";
+import { getAnalytics } from "../core/analytics.js";
 
 const { GRAPHQL_URL, DAY_S } = consts;
 
@@ -156,6 +157,7 @@ export async function detectCurrentLanguage(code, problemSlug = null) {
 // Read current code from page/LeetCode DB
 // ------------------------------
 export async function getCurrentCode() {
+  const analytics = getAnalytics();
   let bestResult = null;
   let bestMethod = "none";
 
@@ -170,7 +172,16 @@ export async function getCurrentCode() {
         bestMethod = "leetcodeIndexedDB";
       }
     }
-  } catch {
+  } catch (e) {
+    analytics.captureIntegrationWarning(
+      "code_access",
+      "indexeddb_failed",
+      {
+        error: e?.message,
+        pathname: window.location.pathname,
+      },
+      { throttle: true }
+    );
     // fall back
   }
 
@@ -188,6 +199,18 @@ export async function getCurrentCode() {
     } catch {
       // ignore
     }
+  }
+
+  if (!bestResult) {
+    analytics.captureIntegrationWarning(
+      "code_access",
+      "no_code_found",
+      {
+        pathname: window.location.pathname,
+        textarea_count: document.querySelectorAll("textarea").length,
+      },
+      { throttle: true }
+    );
   }
 
   return {
@@ -359,10 +382,37 @@ export async function takeCodeSnapshot(username, problemSlug) {
       await (
         await getDBInstance()
       ).storeSnapshots(username, problemSlug, snapshotData);
+
+      const analytics = getAnalytics();
+      analytics.capture(
+        "code_snapshot_taken",
+        {
+          username,
+          problem_slug: problemSlug,
+          snapshot_number: snapshots.length,
+          is_checkpoint: isCheckpoint,
+          code_length: currentCode.length,
+          code_method: codeResult.bestMethod,
+          lines_changed: patchResult.patchText.split("\n").length,
+          chars_changed: patchResult.patchText.length,
+        },
+        { throttle: true }
+      );
     } catch (error) {
       console.warn(
         "[LeetTracker] Failed to save snapshot to IndexedDB:",
         error
+      );
+      const analytics = getAnalytics();
+      analytics.captureError(
+        "snapshot_storage_error",
+        error,
+        {
+          username,
+          problem_slug: problemSlug,
+          snapshot_count: snapshots.length,
+        },
+        { throttle: true }
       );
     }
   });
@@ -451,7 +501,7 @@ export async function cacheTemplatesForProblem(problemSlug) {
     }
     return templates;
   } catch (error) {
-    console.error("❌ [Template Cache] Failed to fetch templates:", error);
+    console.error("[LeetTracker][Snapshots] Failed to fetch templates:", error);
     return storageCached?.templates || [];
   }
 }
@@ -468,7 +518,7 @@ export async function checkForFreshStart(currentCode, problemSlug) {
     const similarity = calculateCodeSimilarity(template.code, currentCode);
     return similarity >= 0.98;
   } catch (error) {
-    console.error("❌ [Fresh Start] Error during check:", error);
+    console.error("[LeetTracker][Snapshots] Error during check:", error);
     return false;
   }
 }

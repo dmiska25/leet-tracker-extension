@@ -19,6 +19,7 @@ import {
   reconstructCodeFromSnapshots,
 } from "../tracking/snapshots.js";
 import { getDBInstance } from "../core/db-instance.js";
+import { getAnalytics } from "../core/analytics.js";
 
 const { SYNC_LOCK_KEY, HEARTBEAT_TIMEOUT_MS, DAY_S } = consts;
 const {
@@ -472,13 +473,34 @@ export async function processBackfillQueue(
     console.log(
       `[LeetTracker] Backfill: processed ${processedCount}, ${remainingQueue.length} remaining`
     );
+
+    // Track backfill progress
+    const analytics = getAnalytics();
+    analytics.capture("backfill_processed", {
+      username,
+      items_processed: processedCount,
+      items_remaining: remainingQueue.length,
+      batch_size: MAX_BACKFILL_PER_SYNC,
+    });
   }
 }
 
 // --------------- main sync orchestrator ---------------
 export async function syncSubmissions(username) {
+  const analytics = getAnalytics();
+  const syncStartTime = Date.now();
+
+  // will be set after loading manifest, defined here for error reporting
+  let lastT = null;
+  let prevTotalSubs = null;
+  let isFirstSync = null;
+
   if (!(await acquireSyncLock())) {
     console.log(`[LeetTracker] Could not acquire sync lock, skipping sync`);
+    analytics.capture("sync_skipped", {
+      username,
+      reason: "lock_held_by_other_tab",
+    });
     return;
   }
 
@@ -493,7 +515,6 @@ export async function syncSubmissions(username) {
   const ENRICHMENT_CUTOFF_DAYS = 90;
   const ENRICHMENT_CUTOFF_TIMESTAMP =
     Math.floor(Date.now() / 1000) - ENRICHMENT_CUTOFF_DAYS * 24 * 60 * 60;
-
   try {
     const manifestKey = getManifestKey(username);
     const seenKey = getSeenProblemsKey(username);
@@ -508,8 +529,10 @@ export async function syncSubmissions(username) {
     ]);
 
     const userHasPremium = userInfo.isPremium || false;
-    const lastT = manifest.lastTimestamp || 0;
-    const prevTotalSubs = manifest.total || 0;
+    lastT = manifest.lastTimestamp || 0;
+    prevTotalSubs = manifest.total || 0;
+    isFirstSync = prevTotalSubs === 0;
+
     const subs = await fetchAllSubmissions(lastT);
     const newTotalSubs = prevTotalSubs + subs.length;
     let totalSynced = manifest.totalSynced || prevTotalSubs;
@@ -521,6 +544,17 @@ export async function syncSubmissions(username) {
 
     if (!subs.length) {
       console.log("[LeetTracker] No new submissions.");
+
+      analytics.capture(
+        "sync_no_new_submissions",
+        {
+          username,
+          total_submissions: prevTotalSubs,
+          last_sync_timestamp: lastT,
+        },
+        { throttle: true, throttleDuration: 3600000 } // 1 hour
+      );
+
       await processBackfillQueue(
         username,
         backfillQueueKey,
@@ -666,11 +700,38 @@ export async function syncSubmissions(username) {
       await executeFlushChunk();
     }
 
+    const syncDuration = Date.now() - syncStartTime;
+
     console.log(
       `[LeetTracker] Synced ${subs.length} submissions (${enrichedCount} fully enriched, ${skippedForBackfill} saved for backfill)`
     );
+
+    // Track successful sync completion
+    analytics.capture("sync_completed", {
+      username,
+      duration_ms: syncDuration,
+      sync_start_timestamp: syncStartTime,
+      new_submissions: subs.length,
+      total_submissions: newTotalSubs,
+      enriched_count: enrichedCount,
+      backfill_count: skippedForBackfill,
+      chunks_created: chunkIdx + 1,
+      is_first_sync: isFirstSync,
+      last_sync_timestamp: lastT,
+      previous_total: prevTotalSubs,
+    });
   } catch (e) {
     console.error("[LeetTracker] Sync failed:", e);
+
+    // Track sync failure
+    analytics.captureError("sync_failed", e, {
+      username,
+      duration_ms: Date.now() - syncStartTime,
+      sync_start_timestamp: syncStartTime,
+      error_stage: "sync_process",
+      last_sync_timestamp: lastT,
+      previous_total: prevTotalSubs,
+    });
   } finally {
     console.log(
       "[LeetTracker] Finished submission sync",
