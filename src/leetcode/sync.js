@@ -503,7 +503,7 @@ export async function syncSubmissions(username) {
   console.log(
     "[LeetTracker] Starting submission sync...",
     username,
-    new Date().toISOString()
+    syncStartTime.toISOString()
   );
 
   const CRITICAL_THRESHOLD_MS = HEARTBEAT_TIMEOUT_MS - 15000;
@@ -529,14 +529,6 @@ export async function syncSubmissions(username) {
     const prevTotalSubs = manifest.total || 0;
     const isFirstSync = prevTotalSubs === 0;
 
-    // Track sync started
-    analytics.capture("sync_started", {
-      username,
-      is_first_sync: isFirstSync,
-      last_sync_timestamp: lastT,
-      previous_total: prevTotalSubs,
-    });
-
     const subs = await fetchAllSubmissions(lastT);
     const newTotalSubs = prevTotalSubs + subs.length;
     let totalSynced = manifest.totalSynced || prevTotalSubs;
@@ -549,10 +541,15 @@ export async function syncSubmissions(username) {
     if (!subs.length) {
       console.log("[LeetTracker] No new submissions.");
 
-      analytics.capture("sync_no_new_submissions", {
-        username,
-        total_submissions: prevTotalSubs,
-      });
+      analytics.capture(
+        "sync_no_new_submissions",
+        {
+          username,
+          total_submissions: prevTotalSubs,
+          last_sync_timestamp: lastT,
+        },
+        { throttle: true, throttleDuration: 3600000 } // 1 hour
+      );
 
       await processBackfillQueue(
         username,
@@ -709,12 +706,15 @@ export async function syncSubmissions(username) {
     analytics.capture("sync_completed", {
       username,
       duration_ms: syncDuration,
+      sync_start_timestamp: syncStartTime,
       new_submissions: subs.length,
       total_submissions: newTotalSubs,
       enriched_count: enrichedCount,
       backfill_count: skippedForBackfill,
       chunks_created: chunkIdx + 1,
       is_first_sync: isFirstSync,
+      last_sync_timestamp: lastT,
+      previous_total: prevTotalSubs,
     });
   } catch (e) {
     console.error("[LeetTracker] Sync failed:", e);
@@ -723,7 +723,10 @@ export async function syncSubmissions(username) {
     analytics.captureError("sync_failed", e, {
       username,
       duration_ms: Date.now() - syncStartTime,
+      sync_start_timestamp: syncStartTime,
       error_stage: "sync_process",
+      last_sync_timestamp: lastT,
+      previous_total: prevTotalSubs,
     });
   } finally {
     console.log(
