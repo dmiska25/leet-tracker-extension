@@ -94,12 +94,6 @@
   font-size: 13px;
 }
 
-/* Close button in header */
-.lt-toast .lt-close {
-  margin-left: auto;
-  flex-shrink: 0;
-}
-
 /* Action row with buttons */
 .lt-toast .lt-toast-actions {
   display: flex;
@@ -142,6 +136,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 .lt-toast .lt-close:hover {

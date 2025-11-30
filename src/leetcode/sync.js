@@ -501,7 +501,7 @@ export async function syncSubmissions(username) {
       username,
       reason: "lock_held_by_other_tab",
     });
-    return { success: false, reason: "lock_held" };
+    return { success: false, error: "lock_held" };
   }
 
   const SESSION_ID = sessionId();

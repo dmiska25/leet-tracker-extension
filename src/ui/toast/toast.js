@@ -25,7 +25,7 @@ import "./toast.css";
 
     const hours = Math.floor(seconds / 3600);
     const mins = Math.floor((seconds % 3600) / 60);
-    const secs = seconds % 60;
+    const secs = Math.floor(seconds % 60);
 
     if (hours > 0) {
       return `${hours}h ${mins}m ${secs}s`;
@@ -64,14 +64,10 @@ import "./toast.css";
     const sub = document.createElement("div");
     sub.className = "lt-toast-sub";
 
-    if (solvesCount === 1 && solveSlug) {
+    if (solvesCount === 1 && solveSlug && solveDuration) {
       title.textContent = `Captured ${solveSlug}`;
-      if (solveDuration) {
-        const formatted = formatDuration(solveDuration);
-        sub.textContent = `duration: ${formatted}`;
-      } else {
-        sub.textContent = "Solve tracked successfully";
-      }
+      const formatted = formatDuration(solveDuration);
+      sub.textContent = `solve time: ${formatted}`;
     } else {
       title.textContent = `Completed sync`;
       sub.textContent = `${solvesCount} solve${
@@ -150,6 +146,12 @@ import "./toast.css";
       timerBar.style.width = "100%";
     });
 
+    // Promise-based resolution
+    let resolvePromise;
+    const hiddenPromise = new Promise((resolve) => {
+      resolvePromise = resolve;
+    });
+
     let hideTimer;
     let resolved = false;
     const hide = (reason) => {
@@ -163,8 +165,8 @@ import "./toast.css";
         try {
           el.remove();
         } catch (e) {}
+        resolvePromise(reason);
       }, 260);
-      return Promise.resolve(reason);
     };
 
     // Close button
@@ -175,15 +177,7 @@ import "./toast.css";
       hide("timeout");
     }, durationMs);
 
-    return new Promise((resolve) => {
-      // Resolve when hidden
-      const checkRemoval = setInterval(() => {
-        if (!doc.body.contains(el)) {
-          clearInterval(checkRemoval);
-          resolve();
-        }
-      }, 100);
-    });
+    return hiddenPromise;
   }
 
   // Expose globally under a namespaced key to avoid collisions

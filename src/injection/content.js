@@ -42,14 +42,23 @@ function showToastAfterSync(result, username) {
     window.leetTrackerToast &&
     typeof window.leetTrackerToast.showSyncToast === "function"
   ) {
-    window.leetTrackerToast.showSyncToast({
-      isBackfill: false,
-      solvesCount,
-      solveSlug: solvesCount === 1 ? solves[0]?.slug : undefined,
-      solveDuration: solvesCount === 1 ? solves[0]?.duration : undefined,
-      leetTrackerUrl,
-      durationMs: 5000,
-    });
+    try {
+      window.leetTrackerToast.showSyncToast({
+        isBackfill: false,
+        solvesCount,
+        solveSlug: solvesCount === 1 ? solves[0]?.slug : undefined,
+        solveDuration: solvesCount === 1 ? solves[0]?.duration : undefined,
+        leetTrackerUrl,
+        durationMs: 5000,
+      });
+    } catch (e) {
+      console.warn("[LeetTracker] Failed to show sync toast:", e);
+      const analytics = getAnalytics();
+      analytics.captureError("toast_display_error", e, {
+        username,
+        solves_count: solvesCount,
+      });
+    }
   }
 }
 
