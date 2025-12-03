@@ -50,8 +50,8 @@
     <h2>What data is stored or shared?</h2>
     <ul>
       <li>
-        All data is stored <strong>locally</strong> in your browser using
-        Chrome’s <code>storage.local</code> API and <code>IndexedDB</code>.
+        All submission data is stored <strong>locally</strong> in your browser using
+        Chrome's <code>storage.local</code> API and <code>IndexedDB</code>.
       </li>
       <li>
         No submission data, personal data, or problem content is sent to any
@@ -61,7 +61,58 @@
         The LeetTracker web app runs entirely in your browser and does not
         transmit or persist data beyond your local machine.
       </li>
+      <li>
+        <strong>Analytics data</strong> (see below) is sent to PostHog for
+        usage tracking and error monitoring to improve the extension.
+      </li>
     </ul>
+
+    <h2>Analytics and Usage Tracking</h2>
+    <p>
+      LeetTracker uses <strong>PostHog</strong>, a privacy-focused analytics platform, 
+      to collect usage data. This helps us understand how the extension is 
+      used and identify bugs or performance issues.
+    </p>
+    
+    <h3>What analytics data is collected?</h3>
+    <ul>
+      <li><strong>LeetCode username and user ID</strong>: Used for debugging and correlating events</li>
+      <li><strong>Usage events</strong>: Extension sessions, sync operations, feature usage</li>
+      <li><strong>Performance metrics</strong>: Sync duration, enrichment times, backfill progress</li>
+      <li><strong>Error reports</strong>: JavaScript errors, API failures, lock timeouts</li>
+      <li><strong>Extension metadata</strong>: Version number, environment (dev/prod)</li>
+    </ul>
+
+    <h3>What is NOT collected?</h3>
+    <ul>
+      <li>Submission code or problem solutions</li>
+      <li>Problem descriptions or content</li>
+      <li>Personal notes or annotations</li>
+    </ul>
+
+    <h3>Data Retention</h3>
+    <p>
+      Analytics events are retained by PostHog for <strong>90 days</strong> and then 
+      automatically deleted. No long-term storage of analytics data occurs.
+    </p>
+
+    <h3>How to Opt Out</h3>
+    <p>
+      While the extension does not currently have a built-in toggle to disable analytics, 
+      you can block analytics tracking using any of these methods:
+    </p>
+    <ul>
+      <li><strong>Chrome Extension Settings</strong>: Right-click the LeetTracker icon → "Manage Extension" → scroll to "Site access" → click "Add" under "Blocked sites" → enter <code>https://us.i.posthog.com/*</code></li>
+      <li><strong>Content Blockers</strong>: Use browser extensions that block analytics (e.g., uBlock Origin with <code>us.i.posthog.com</code> filter)</li>
+      <li><strong>Firewall/DNS</strong>: Configure your browser or network to block PostHog domains</li>
+    </ul>
+    <p>
+      Blocking analytics will not affect the extension's core functionality. The extension 
+      will continue to sync and track your submissions normally.
+    </p>
+    <p>
+      We respect your privacy. A future version may include an opt-out toggle in the extension settings.
+    </p>
 
     <h2>Third-party data usage</h2>
     <p>

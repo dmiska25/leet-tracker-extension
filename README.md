@@ -4,27 +4,33 @@ Track your LeetCode progress directly in the browser and sync submissions to the
 
 ## Features
 
-- Auto-sync LeetCode submissions and metadata
-- Track solve time using passive problem visit logs
-- Save enriched problem data locally (no cloud storage)
-- Seamless integration with the [LeetTracker web app](https://github.com/dmiska25/leet-tracker)
+- **Auto-sync LeetCode submissions** with intelligent backfill queue for large histories
+- **Track solve time** using passive problem visit logs and code snapshots
+- **Smart notifications** — welcome toast for new users, sync status updates, sign-in reminders
+- **Seamless integration** with the [LeetTracker web app](https://github.com/dmiska25/leet-tracker)
 
 ## How It Works
 
 - The extension runs on `leetcode.com` and watches for problem activity and submission events.
 - On first run, it fetches your entire submission history (in batches) and enriches each solve with metadata like solve time, code, and description.
-- If your history is large, this may take several minutes.
-- Submissions are stored in local browser storage (`chrome.storage.local`) and exposed to the LeetTracker web app via `window.postMessage`.
+- **Intelligent backfill system**: Recent submissions (last 90 days) are enriched immediately. Older submissions are queued for background processing to keep initial sync fast.
+- **Toast notifications** keep you informed: welcome message for first-time users, sync completion updates, and sign-in reminders.
+- **Privacy-focused analytics** track usage patterns (errors, sync times, feature usage) to help improve the extension.
+- Submissions are stored in local browser storage (`chrome.storage.local` and `IndexedDB`) and exposed to the LeetTracker web app via `window.postMessage`.
 - Future syncs are incremental and only fetch new submissions.
 
 ## Installation (Development)
 
-To load the extension manually:
+To build and load the extension manually:
 
 1. Clone or download this repo
-2. Open Chrome and go to `chrome://extensions/`
-3. Enable "Developer Mode"
-4. Click "Load unpacked" and select the folder
+2. Install dependencies: `npm install`
+3. Build the extension: `npm run build` (uses Vite bundler)
+4. Open Chrome and go to `chrome://extensions/`
+5. Enable "Developer Mode"
+6. Click "Load unpacked" and select the `build/` folder
+
+For development with auto-rebuild: `npm run dev`
 
 ## Permissions
 
