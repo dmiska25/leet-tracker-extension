@@ -195,6 +195,13 @@ export async function fetchAllSubmissions(lastTimestamp) {
           throw new Error("Missing submissions data");
         }
 
+        // Special case: new user with no submissions (offset=0, empty array)
+        if (offset === 0 && json.data.submissionList.submissions.length === 0) {
+          console.log("[LeetTracker] New user detected (no submissions yet)");
+          success = true;
+          break;
+        }
+
         success = true;
       } catch (err) {
         console.warn(

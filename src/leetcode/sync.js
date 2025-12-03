@@ -531,7 +531,7 @@ export async function syncSubmissions(username) {
     const userHasPremium = userInfo.isPremium || false;
     lastT = manifest.lastTimestamp || 0;
     prevTotalSubs = manifest.total || 0;
-    isFirstSync = prevTotalSubs === 0;
+    isFirstSync = lastT === 0;
 
     const subs = await fetchAllSubmissions(lastT);
     const newTotalSubs = prevTotalSubs + subs.length;
@@ -544,6 +544,33 @@ export async function syncSubmissions(username) {
 
     if (!subs.length) {
       console.log("[LeetTracker] No new submissions.");
+
+      // For first-time users with no submissions, initialize empty manifest
+      if (isFirstSync) {
+        console.log(
+          "[LeetTracker] First-time user with no submissions, initializing empty manifest"
+        );
+        await saveToStorage(manifestKey, {
+          chunkCount: 0,
+          lastTimestamp: 1, // mark 1 so we know we've done first sync
+          chunks: [],
+          total: 0,
+          totalSynced: 0,
+          skippedForBackfill: 0,
+        });
+
+        analytics.capture("sync_completed_first_time_empty", {
+          username,
+          duration_ms: Date.now() - syncStartTime,
+        });
+
+        return {
+          success: true,
+          newSolves: 0,
+          isBackfill: false,
+          isFirstSync: true,
+        };
+      }
 
       analytics.capture(
         "sync_no_new_submissions",
