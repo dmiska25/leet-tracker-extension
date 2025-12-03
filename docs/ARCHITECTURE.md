@@ -14,7 +14,8 @@ LeetTracker is a Chrome extension that automatically tracks your LeetCode proble
 4. [Key Processes](#key-processes)
 5. [Storage Strategy](#storage-strategy)
 6. [Synchronization System](#synchronization-system)
-7. [Design Decisions](#design-decisions)
+7. [Analytics and User Notifications](#analytics-and-user-notifications)
+8. [Design Decisions](#design-decisions)
 
 ---
 
@@ -95,7 +96,9 @@ src/
 │   ├── config.js           # Constants, keys, Chrome storage wrapper
 │   ├── storage.js          # IndexedDB wrapper (snapshots, journeys, runs)
 │   ├── locks.js            # Cross-tab sync locking with heartbeat
-│   └── db-instance.js      # Singleton pattern for DB access
+│   ├── db-instance.js      # Singleton pattern for DB access
+│   ├── analytics.js        # PostHog analytics integration
+│   └── utils.js            # Utility functions (version, etc.)
 │
 ├── leetcode/               # LeetCode platform integration
 │   ├── api.js              # GraphQL & REST API calls with retry logic
@@ -105,6 +108,11 @@ src/
 ├── tracking/               # User activity tracking
 │   ├── snapshots.js        # Code snapshot system with diff/patch
 │   └── watchers.js         # UI observers (submit button, navigation, run code)
+│
+├── ui/                     # User interface components
+│   └── toast/              # Toast notification system
+│       ├── toast.js        # Toast creation and management
+│       └── toast.css       # Toast styling
 │
 └── injection/              # Chrome extension entry points
     ├── content.js          # Main content script (runs on leetcode.com)
@@ -210,7 +218,7 @@ flowchart TB
 ```
 
 **Key Design Decisions**:
-- **30-day cutoff**: Submissions older than 30 days are queued for backfill (balances UX vs performance)
+- **90-day cutoff**: Submissions older than 90 days are queued for backfill (balances UX vs performance, matches webapp computation limit)
 - **Immediate storage**: Old submissions still stored with basic data (id, titleSlug, timestamp)
 - **Lazy enrichment**: Queue processed only when no new submissions detected (prioritizes fresh data)
 - **Batch size**: Processes 20 submissions per backfill run (prevents blocking, maintains heartbeat)
@@ -221,11 +229,11 @@ flowchart TB
 
 **Example Timeline**:
 - User with 500 submissions syncs for first time
-- Submissions from last 30 days (e.g., 50) enriched immediately → ~30-60 seconds
-- Remaining 450 queued for backfill, stored with basic data
+- Submissions from last 90 days (e.g., 100) enriched immediately → ~1-2 minutes
+- Remaining 400 queued for backfill, stored with basic data
 - User submits a new solution → sync runs, processes new submission only
 - User visits LeetCode later (no new submissions) → sync processes 20 from backfill queue
-- After ~23 "idle" syncs, all historical data is enriched
+- After ~20 "idle" syncs, all historical data is enriched
 - User sees recent data instantly, historical data fills in during idle times
 
 ---
@@ -335,7 +343,118 @@ sequenceDiagram
 
 ---
 
-### 4. Fresh Start Detection Flow
+### 4. PostHog Analytics Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Extension
+    participant Analytics as core/analytics.js
+    participant PostHog as PostHog Cloud
+    participant Queue as Event Queue
+    
+    User->>Extension: Performs action
+    Extension->>Analytics: capture(event, properties)
+    
+    Analytics->>Analytics: Check if initialized
+    
+    alt Not initialized
+        Analytics->>Queue: Add to pending queue
+        Note over Queue: Max 100 events
+    else Initialized
+        Analytics->>Analytics: Apply throttling
+        
+        alt Event throttled
+            Analytics->>Analytics: Skip event
+        else Event allowed
+            Analytics->>PostHog: POST /capture
+            Note over PostHog: Anonymous event tracking
+        end
+    end
+    
+    Note over Analytics: Async initialization on load
+    Analytics->>PostHog: Initialize SDK
+    PostHog-->>Analytics: Ready
+    
+    Analytics->>Queue: Flush pending events
+    Queue->>PostHog: Send queued events
+```
+
+**Key Design Decisions**:
+- **Async initialization**: Analytics loads in background, doesn't block extension startup
+- **Event queue**: Buffers up to 100 events before initialization completes
+- **Throttling**: Prevents spam for high-frequency events (e.g., sync checks every minute)
+- **Anonymous identification**: Uses username for grouping, but hashed/anonymized
+- **Error capture**: Automatic error tracking with context (username, operation, metadata)
+- **Graceful degradation**: If PostHog fails to load, extension continues working normally
+- **Environment awareness**: Tracks dev vs prod environment in events
+
+**Events Tracked**:
+- Extension sessions (started, anonymous)
+- Sync operations (completed, failed, no new submissions)
+- Backfill progress (items processed, remaining)
+- User interactions (toasts displayed, welcome messages)
+- Errors (API failures, lock timeouts, enrichment failures)
+
+---
+
+### 5. Toast Notification Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Extension
+    participant Toast as ui/toast/toast.js
+    participant DOM
+    
+    Extension->>Extension: Trigger condition met
+    
+    alt Welcome Toast (First Sign-In)
+        Extension->>Toast: showWelcomeToast({username, durationMs})
+        Toast->>DOM: Create toast element
+        Toast->>DOM: Add logo, title, body
+        Note over DOM: "Welcome to LeetTracker, {username}!<br/>Sync will begin shortly"
+    else Sign-In Required Toast
+        Extension->>Toast: showSignInRequiredToast({durationMs})
+        Toast->>DOM: Create toast element
+        Note over DOM: "Sign in required<br/>LeetTracker requires you to sign in to begin sync"
+    else Sync Complete Toast
+        Extension->>Toast: showSyncToast({solvesCount, solveSlug, durationMs})
+        Toast->>DOM: Create toast element
+        Note over DOM: "Completed sync<br/>X solves added"
+    end
+    
+    Toast->>DOM: Inject into container (top-right)
+    Toast->>DOM: Apply show animation
+    Toast->>DOM: Start timer bar animation
+    
+    alt User clicks close
+        User->>Toast: Click close button
+        Toast->>DOM: Remove toast
+    else Timer expires
+        Toast->>Toast: Auto-hide after durationMs
+        Toast->>DOM: Remove toast
+    end
+```
+
+**Key Design Decisions**:
+- **Dependency-free**: Pure JavaScript/CSS, no external UI libraries
+- **Non-blocking**: Toasts don't interrupt user workflow
+- **Stacked display**: Multiple toasts stack vertically (newest on top)
+- **Logo branding**: All toasts include LeetTracker logo for consistency
+- **Configurable duration**: 5s for sync, 15s for welcome/sign-in
+- **Dismissable**: User can close manually or wait for auto-dismiss
+- **Progress indicator**: Timer bar shows remaining time
+- **Accessibility**: ARIA labels, semantic HTML, keyboard support
+
+**Toast Types**:
+1. **Welcome Toast** (15s): Shown once on first sign-in, includes username
+2. **Sign-In Required Toast** (15s): Shown when sign-in fails after retries
+3. **Sync Complete Toast** (5s): Shown after successful sync with new submissions
+
+---
+
+### 6. Fresh Start Detection Flow
 
 ```mermaid
 flowchart TD
@@ -575,15 +694,17 @@ The extension runs several concurrent processes to track your LeetCode activity:
 
 | Process | Purpose | Trigger | Frequency |
 |---------|---------|---------|-----------|
-| **Extension Initialization** | Sets up database, watchers, and sync on page load | Page load on leetcode.com | Once per page load |
-| **Submission Sync** | Fetches and enriches new submissions from LeetCode API | Page load, navigation, interval | Every 5 minutes + on navigation |
-| **Backfill Queue Processing** | Enriches older (>30 day) submissions during idle time | When no new submissions found | During idle syncs only |
+| **Extension Initialization** | Sets up database, watchers, analytics, and sync on page load | Page load on leetcode.com | Once per page load |
+| **Submission Sync** | Fetches and enriches new submissions from LeetCode API | Page load, navigation, interval | Every 1 minute + on navigation |
+| **Backfill Queue Processing** | Enriches older (>90 day) submissions during idle time | When no new submissions found | During idle syncs only |
 | **Code Snapshot Watcher** | Captures code changes with diff-based patches | Editor content changes | Every 500ms (when significant change) |
 | **Fresh Start Detector** | Detects when user resets to starter code | Editor content changes | Every 500ms (polling) |
 | **Problem Navigation Watcher** | Tracks when user visits a problem page | URL changes, DOM mutations | Continuous (MutationObserver) |
 | **Submit Button Hook** | Intercepts submission events | Submit button click | Event-driven |
 | **Run Code Tracker** | Captures "Run Code" attempts and results | Run Code button click | Event-driven (via page script) |
 | **Run Code Message Bridge** | Receives run events from page context | postMessage from page script | Event-driven (message listener) |
+| **Analytics Tracking** | Sends usage events to PostHog for monitoring | Various events (sync, errors, sessions) | Event-driven (throttled) |
+| **Toast Notifications** | Displays user feedback (welcome, sync status, sign-in) | First sign-in, sync complete, sign-in failure | Event-driven |
 
 **Process Relationships**:
 - **Submission Sync** populates the journey archive with historical data
@@ -602,8 +723,10 @@ sequenceDiagram
     participant Browser
     participant Manifest
     participant Content as injection/content.js
+    participant Analytics as core/analytics.js
     participant DBInit as core/db-instance.js
     participant Watchers as tracking/watchers.js
+    participant Toast as ui/toast/toast.js
     
     Browser->>Manifest: Load extension
     Manifest->>Content: Inject content script
@@ -615,9 +738,15 @@ sequenceDiagram
         DBInit->>DBInit: Initialize IndexedDB
         DBInit-->>Content: DB ready
         
+        Content->>Analytics: initAnalytics() (async)
+        Note over Analytics: Loads in background
+        
         Content->>Content: getUserInfoWithCache()
         
-        alt User logged in
+        alt User logged in (first time)
+            Content->>Analytics: identify(username)
+            Content->>Analytics: capture("extension_session_started")
+            Content->>Toast: showWelcomeToast(username)
             Content->>Content: syncSubmissions(username)
             Content->>Watchers: startProblemNavigationWatcher()
             Content->>Watchers: startCodeSnapshotWatcher()
@@ -628,9 +757,16 @@ sequenceDiagram
             Watchers->>Watchers: Inject page.js script
             
             Content->>Watchers: startRunCodeMessageBridge()
-            
             Content->>Content: Start intervals (sync, hook submit)
-        else Not logged in
+        else User logged in (returning)
+            Content->>Analytics: identify(username)
+            Content->>Analytics: capture("extension_session_started")
+            Content->>Content: syncSubmissions(username)
+            Content->>Watchers: Start all watchers
+            Content->>Content: Start intervals
+        else Not logged in (after retries)
+            Content->>Toast: showSignInRequiredToast()
+            Content->>Analytics: capture("extension_session_started_anonymous")
             Content->>Content: Exit (no tracking)
         end
     else Not LeetCode
@@ -694,6 +830,65 @@ async function enrichSubmission(submission, username) {
 - **Cache where possible**: Problem descriptions cached (same for all users)
 - **Conditional fetching**: Only fetch code if not already in initial submission data
 - **Temporal linking**: Groups snapshots and run events by solve window timestamps
+
+---
+
+## Analytics and User Notifications
+
+### PostHog Analytics Integration
+
+The extension uses PostHog for privacy-focused analytics to understand usage patterns and improve reliability.
+
+**Implementation Details**:
+- **Location**: `src/core/analytics.js`
+- **Initialization**: Async on extension load, doesn't block startup
+- **Event Queue**: Buffers up to 100 events before PostHog loads
+- **Throttling**: Prevents duplicate events (e.g., sync checks)
+- **Error Tracking**: Automatic capture with context and metadata
+
+**Privacy Design**:
+- Anonymous user identification (hashed username)
+- No code, solutions, or problem content tracked
+- 90-day data retention
+- Environment-aware (dev vs prod)
+
+**Key Metrics Tracked**:
+- Sync performance (duration, errors, backfill progress)
+- Extension sessions (active users, environment)
+- Feature usage (toast displays, fresh starts)
+- Error rates (API failures, lock timeouts)
+
+### Toast Notification System
+
+Provides user feedback for key events without interrupting workflow.
+
+**Implementation Details**:
+- **Location**: `src/ui/toast/toast.js` + `toast.css`
+- **Dependency-free**: Pure JavaScript, no UI frameworks
+- **Stacked display**: Multiple toasts shown simultaneously
+- **Auto-dismiss**: Configurable duration with progress bar
+
+**Toast Types**:
+1. **Welcome Toast** (15s)
+   - Trigger: First-time user sign-in detected
+   - Content: Personalized welcome with username
+   - Purpose: Onboard new users, explain what's happening
+
+2. **Sign-In Required Toast** (15s)
+   - Trigger: getUserInfoWithCache() fails after 10 retries
+   - Content: Explains extension needs LeetCode sign-in
+   - Purpose: Guide users who aren't logged in
+
+3. **Sync Complete Toast** (5s)
+   - Trigger: syncSubmissions() completes with new submissions
+   - Content: Shows number of new solves (or single solve details)
+   - Purpose: Confirm sync worked, provide feedback link
+
+**Design Principles**:
+- Non-blocking (can be dismissed)
+- Consistent branding (logo on all toasts)
+- Accessible (ARIA labels, keyboard support)
+- Visual feedback (timer bar shows remaining time)
 
 ---
 
