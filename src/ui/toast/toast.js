@@ -180,8 +180,217 @@ import "./toast.css";
     return hiddenPromise;
   }
 
+  // Show sign-in required toast
+  async function showSignInRequiredToast(options = {}) {
+    const { container = document.body, durationMs = 15000 } = options;
+
+    const doc = container.ownerDocument || document;
+    const c = getContainer(doc);
+
+    const el = document.createElement("div");
+    el.className = "lt-toast";
+    el.setAttribute("role", "status");
+    el.setAttribute("aria-live", "polite");
+
+    // Header with logo, message, and close button
+    const header = document.createElement("div");
+    header.className = "lt-toast-header";
+
+    // Logo
+    const logo = document.createElement("img");
+    logo.className = "lt-toast-logo";
+    logo.src = chrome.runtime.getURL("assets/images/icon48.png");
+    logo.alt = "LeetTracker";
+    header.appendChild(logo);
+
+    // Message content
+    const msg = document.createElement("div");
+    msg.className = "lt-toast-message";
+    const title = document.createElement("div");
+    title.className = "lt-toast-title";
+    title.textContent = "Sign in required";
+
+    const sub = document.createElement("div");
+    sub.className = "lt-toast-sub";
+    sub.textContent =
+      "LeetTracker requires you to sign in to LeetCode to begin sync";
+
+    msg.appendChild(title);
+    msg.appendChild(sub);
+    header.appendChild(msg);
+
+    // Close button in header
+    const close = document.createElement("button");
+    close.className = "lt-close";
+    close.setAttribute("aria-label", "Dismiss notification");
+    close.innerHTML = "&#10005;";
+    header.appendChild(close);
+
+    // Timer bar
+    const timer = document.createElement("div");
+    timer.className = "lt-timer";
+    const timerBar = document.createElement("div");
+    timerBar.className = "lt-timer-bar";
+    timer.appendChild(timerBar);
+
+    el.appendChild(header);
+    el.appendChild(timer);
+
+    // Insert newest on top (right aligned)
+    c.insertBefore(el, c.firstChild);
+
+    // Force a small layout so transitions can run
+    requestAnimationFrame(() => {
+      el.classList.add("show");
+    });
+
+    // Timer animation
+    timerBar.style.transition = `width ${durationMs}ms linear`;
+    timerBar.style.width = "0%";
+    requestAnimationFrame(() => {
+      timerBar.style.width = "100%";
+    });
+
+    // Promise-based resolution
+    let resolvePromise;
+    const hiddenPromise = new Promise((resolve) => {
+      resolvePromise = resolve;
+    });
+
+    let hideTimer;
+    let resolved = false;
+    const hide = (reason) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(hideTimer);
+      el.classList.remove("show");
+      setTimeout(() => {
+        try {
+          el.remove();
+        } catch (e) {}
+        resolvePromise(reason);
+      }, 260);
+    };
+
+    // Close button
+    close.addEventListener("click", () => hide("closed"));
+
+    // Auto-hide
+    hideTimer = setTimeout(() => {
+      hide("timeout");
+    }, durationMs);
+
+    return hiddenPromise;
+  }
+
+  // Show welcome toast
+  async function showWelcomeToast(options = {}) {
+    const { username, container = document.body, durationMs = 15000 } = options;
+
+    if (!username) return Promise.resolve();
+
+    const doc = container.ownerDocument || document;
+    const c = getContainer(doc);
+
+    const el = document.createElement("div");
+    el.className = "lt-toast";
+    el.setAttribute("role", "status");
+    el.setAttribute("aria-live", "polite");
+
+    // Header with logo, message, and close button
+    const header = document.createElement("div");
+    header.className = "lt-toast-header";
+
+    // Logo
+    const logo = document.createElement("img");
+    logo.className = "lt-toast-logo";
+    logo.src = chrome.runtime.getURL("assets/images/icon48.png");
+    logo.alt = "LeetTracker";
+    header.appendChild(logo);
+
+    // Message content
+    const msg = document.createElement("div");
+    msg.className = "lt-toast-message";
+    const title = document.createElement("div");
+    title.className = "lt-toast-title";
+    title.textContent = `Welcome to LeetTracker, ${username}!`;
+
+    const sub = document.createElement("div");
+    sub.className = "lt-toast-sub";
+    sub.textContent = "Sync will begin shortly";
+
+    msg.appendChild(title);
+    msg.appendChild(sub);
+    header.appendChild(msg);
+
+    // Close button in header
+    const close = document.createElement("button");
+    close.className = "lt-close";
+    close.setAttribute("aria-label", "Dismiss notification");
+    close.innerHTML = "&#10005;";
+    header.appendChild(close);
+
+    // Timer bar
+    const timer = document.createElement("div");
+    timer.className = "lt-timer";
+    const timerBar = document.createElement("div");
+    timerBar.className = "lt-timer-bar";
+    timer.appendChild(timerBar);
+
+    el.appendChild(header);
+    el.appendChild(timer);
+
+    // Insert newest on top (right aligned)
+    c.insertBefore(el, c.firstChild);
+
+    // Force a small layout so transitions can run
+    requestAnimationFrame(() => {
+      el.classList.add("show");
+    });
+
+    // Timer animation
+    timerBar.style.transition = `width ${durationMs}ms linear`;
+    timerBar.style.width = "0%";
+    requestAnimationFrame(() => {
+      timerBar.style.width = "100%";
+    });
+
+    // Promise-based resolution
+    let resolvePromise;
+    const hiddenPromise = new Promise((resolve) => {
+      resolvePromise = resolve;
+    });
+
+    let hideTimer;
+    let resolved = false;
+    const hide = (reason) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(hideTimer);
+      el.classList.remove("show");
+      setTimeout(() => {
+        try {
+          el.remove();
+        } catch (e) {}
+        resolvePromise(reason);
+      }, 260);
+    };
+
+    // Close button
+    close.addEventListener("click", () => hide("closed"));
+
+    // Auto-hide
+    hideTimer = setTimeout(() => {
+      hide("timeout");
+    }, durationMs);
+
+    return hiddenPromise;
+  }
+
   // Expose globally under a namespaced key to avoid collisions
   global.leetTrackerToast = {
     showSyncToast,
+    showSignInRequiredToast,
+    showWelcomeToast,
   };
 })(window);

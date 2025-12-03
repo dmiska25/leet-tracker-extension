@@ -482,21 +482,32 @@ export async function fetchSubmissionDetails(submissionId) {
 // --- Sign-in / user info caching ---
 let cachedUserInfo = { userId: null, username: null, isPremium: false };
 let userInfoPromise = null;
+let isFirstSignIn = false;
 
 /**
  * Get signed-in user info with memoization + bounded retries/backoff.
  * @param {number} maxAttempts
- * @returns {Promise<{userId:string|null, username:string|null, isPremium:boolean}>}
+ * @returns {Promise<{userId:string|null, username:string|null, isPremium:boolean, signInFailed:boolean, isFirstSignIn:boolean}>}
  */
-export function getUserInfoWithCache(maxAttempts = 10) {
+export function getUserInfoWithCache(maxAttempts = 4) {
   if (cachedUserInfo.userId && cachedUserInfo.username) {
-    return Promise.resolve(cachedUserInfo);
+    return Promise.resolve({
+      ...cachedUserInfo,
+      signInFailed: false,
+      isFirstSignIn: false,
+    });
   }
   if (userInfoPromise) return userInfoPromise;
 
   userInfoPromise = (async () => {
     let attempt = 0;
     let delay = 1000;
+
+    // Check if we've seen this user before
+    const hasSeenUserBefore = await chrome.storage.local.get([
+      "lt_has_signed_in",
+    ]);
+    const firstTime = !hasSeenUserBefore.lt_has_signed_in;
 
     while (attempt < maxAttempts) {
       try {
@@ -540,7 +551,14 @@ export function getUserInfoWithCache(maxAttempts = 10) {
           console.log(
             `[LeetTracker] User ${cachedUserInfo.username} premium status: ${cachedUserInfo.isPremium}`
           );
-          return cachedUserInfo;
+
+          // Mark that user has signed in (only set it once)
+          if (firstTime) {
+            isFirstSignIn = true;
+            await chrome.storage.local.set({ lt_has_signed_in: true });
+          }
+
+          return { ...cachedUserInfo, signInFailed: false, isFirstSignIn };
         }
       } catch (e) {
         // continue to retry
@@ -554,8 +572,8 @@ export function getUserInfoWithCache(maxAttempts = 10) {
       attempt++;
     }
 
-    // Return whatever we have (possibly empty) after exhausting attempts
-    return cachedUserInfo;
+    // Return with signInFailed flag after exhausting attempts
+    return { ...cachedUserInfo, signInFailed: true, isFirstSignIn: false };
   })();
 
   return userInfoPromise;
