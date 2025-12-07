@@ -342,3 +342,145 @@ export function startRunCodeMessageBridge(username) {
     }
   });
 }
+
+/**
+ * Inject page-level script to monitor hint/solution interactions
+ */
+export function injectHintTracker() {
+  const inject = () => {
+    try {
+      if (document.querySelector("script[data-leettracker-hint-tracker]")) {
+        console.log("[LeetTracker] Hint tracker already injected");
+        return;
+      }
+
+      const url = chrome.runtime.getURL("src/injection/page_hint_tracker.js");
+
+      if (!url || url.includes("chrome-extension://invalid")) {
+        console.warn(
+          "[LeetTracker] injectHintTracker: computed invalid URL:",
+          url
+        );
+        return;
+      }
+
+      if (!document.documentElement || !document.head) {
+        console.warn(
+          "[LeetTracker] injectHintTracker: DOM not ready, deferring"
+        );
+        return;
+      }
+
+      const s = document.createElement("script");
+      s.src = url;
+      s.async = false;
+      s.type = "text/javascript";
+      s.dataset.leettrackerHintTracker = "true";
+      s.onload = () =>
+        console.log("[LeetTracker] Hint tracker injected successfully");
+      s.onerror = (e) => {
+        const analytics = getAnalytics();
+        console.error("[LeetTracker] Failed to load hint tracker:", e);
+        analytics.captureIntegrationWarning(
+          "hint_tracker_injection",
+          "script_load_failed",
+          { url, error: e?.message || String(e) }
+        );
+      };
+
+      (document.head || document.documentElement).appendChild(s);
+    } catch (e) {
+      const analytics = getAnalytics();
+      console.error("[LeetTracker] injectHintTracker failed:", e);
+      analytics.captureError("hint_tracker_injection_error", e, {
+        pathname: window.location.pathname,
+        readyState: document.readyState,
+      });
+    }
+  };
+
+  if (document.readyState === "loading" || !document.documentElement) {
+    document.addEventListener("DOMContentLoaded", inject, { once: true });
+  } else {
+    inject();
+  }
+}
+
+/**
+ * Bridge hint interaction messages from page context to extension,
+ * and persist to IndexedDB
+ */
+export function startHintMessageBridge(username) {
+  window.addEventListener("message", async (event) => {
+    if (event.source !== window) return;
+    const d = event.data;
+    if (!d || d.source !== "leettracker") return;
+
+    if (d.type === "lt-hint-viewed") {
+      try {
+        const { hintType, hintNumber, timestamp } = d.payload || {};
+        const problemSlug =
+          getCurrentProblemSlug() ||
+          (window.location.pathname.match(/^\/problems\/([^\/]+)\/?/) ||
+            [])[1] ||
+          "unknown";
+
+        const hintRecord = {
+          timestamp: timestamp || Date.now(),
+          hintType, // 'leetcode_hint' or 'solution_peek'
+          hintNumber: hintNumber || null, // Only for hints, null for solution
+        };
+
+        const db = await getDBInstance();
+        if (db && typeof db.storeHintEvent === "function") {
+          await db.storeHintEvent(username, problemSlug, hintRecord);
+
+          console.log(
+            `[LeetTracker][HintWatcher] Stored hint event for ${problemSlug}: ` +
+              `type=${hintType}` +
+              (hintNumber ? `, hint=${hintNumber}` : "")
+          );
+
+          const analytics = getAnalytics();
+          analytics.capture("hint_interaction_tracked", {
+            username,
+            problem_slug: problemSlug,
+            hint_type: hintType,
+            hint_number: hintNumber,
+          });
+        }
+      } catch (e) {
+        const analytics = getAnalytics();
+        console.warn("[LeetTracker] Failed to handle lt-hint-viewed:", e);
+        analytics.captureError("hint_bridge_error", e, {
+          username,
+          pathname: window.location.pathname,
+        });
+      }
+    }
+
+    if (d.type === "lt-integration-warning") {
+      try {
+        const { warningType, details, pathname } = d.payload || {};
+        const analytics = getAnalytics();
+
+        analytics.captureIntegrationWarning(
+          `hint_tracker_${warningType}`,
+          "element_not_found",
+          {
+            username,
+            pathname,
+            ...details,
+          }
+        );
+
+        console.warn(
+          `[LeetTracker][HintWatcher] Integration warning: ${warningType}`,
+          details
+        );
+      } catch (e) {
+        console.warn("[LeetTracker] Failed to handle integration warning:", e);
+      }
+    }
+  });
+}

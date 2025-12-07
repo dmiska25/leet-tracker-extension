@@ -10,7 +10,7 @@ class LeetTrackerDB {
 
   async init() {
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open("LeetTrackerDB", 2);
+      const request = indexedDB.open("LeetTrackerDB", 3);
 
       request.onerror = () => {
         console.error("[LeetTracker] IndexedDB init failed:", request.error);
@@ -59,7 +59,7 @@ class LeetTrackerDB {
         const transaction = event.target.transaction;
 
         console.log(
-          `[LeetTracker] Upgrading IndexedDB from version ${oldVersion} to 2`
+          `[LeetTracker] Upgrading IndexedDB from version ${oldVersion} to 3`
         );
 
         // Templates store
@@ -109,6 +109,16 @@ class LeetTrackerDB {
           groupStore.createIndex("titleSlug", "titleSlug");
           groupStore.createIndex("timestamp", "timestamp");
           groupStore.createIndex("archivedAt", "archivedAt");
+        }
+
+        // Hint events store - tracks hint/solution views during problem solving
+        if (!db.objectStoreNames.contains("hintEvents")) {
+          const hintStore = db.createObjectStore("hintEvents", {
+            keyPath: "id",
+          });
+          hintStore.createIndex("username", "username");
+          hintStore.createIndex("problemSlug", "problemSlug");
+          hintStore.createIndex("timestamp", "timestamp");
         }
 
         // Migration from v1 to v2: Convert seen problems list to new object format
@@ -477,6 +487,62 @@ class LeetTrackerDB {
       const request = store.put(data);
       request.onsuccess = () => resolve();
       request.onerror = () => reject(request.error);
+    });
+  }
+
+  // --- Hint Event Management ---
+  async storeHintEvent(username, problemSlug, hintData) {
+    const db = await this.ensureDB();
+    const id = `${username}_${problemSlug}_${hintData.timestamp || Date.now()}`;
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(["hintEvents"], "readwrite");
+      const store = transaction.objectStore("hintEvents");
+      const data = {
+        id,
+        username,
+        problemSlug,
+        ...hintData,
+      };
+      const request = store.put(data);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  async getHintEventsInWindow(username, problemSlug, startMs, endMs) {
+    const db = await this.ensureDB();
+
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(["hintEvents"], "readonly");
+      const store = tx.objectStore("hintEvents");
+      const idx = store.index("timestamp");
+
+      const range =
+        startMs != null && endMs != null
+          ? IDBKeyRange.bound(startMs, endMs)
+          : startMs != null
+          ? IDBKeyRange.lowerBound(startMs)
+          : endMs != null
+          ? IDBKeyRange.upperBound(endMs)
+          : null;
+
+      const events = [];
+      const req = range ? idx.openCursor(range) : idx.openCursor();
+
+      req.onsuccess = (ev) => {
+        const cursor = ev.target.result;
+        if (cursor) {
+          const v = cursor.value;
+          if (v.username === username && v.problemSlug === problemSlug) {
+            events.push(v);
+          }
+          cursor.continue();
+        } else {
+          events.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+          resolve(events);
+        }
+      };
+      req.onerror = () => reject(req.error);
     });
   }
 }

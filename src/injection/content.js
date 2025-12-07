@@ -7,6 +7,8 @@ import {
   startProblemNavigationWatcher,
   injectRunCodeWatcher,
   startRunCodeMessageBridge,
+  injectHintTracker,
+  startHintMessageBridge,
 } from "../tracking/watchers.js";
 import { getDBInstance } from "../core/db-instance.js";
 import { initAnalytics, getAnalytics } from "../core/analytics.js";
@@ -135,6 +137,8 @@ function trySyncIfLoggedIn() {
         startFreshStartWatcher(username);
         injectRunCodeWatcher();
         startRunCodeMessageBridge(username);
+        injectHintTracker();
+        startHintMessageBridge(username);
 
         return true;
       } else {
