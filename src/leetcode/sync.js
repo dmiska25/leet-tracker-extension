@@ -702,7 +702,7 @@ export async function syncSubmissions(username) {
       return { success: true, newSolves: 0, isBackfill: false };
     }
 
-    let chunkIdx = manifest.chunkCount - 1 || 0;
+    let chunkIdx = Math.max(0, manifest.chunkCount - 1);
     let chunk = await getFromStorage(getChunkKey(username, chunkIdx), []);
     const meta = manifest.chunks || [];
 
