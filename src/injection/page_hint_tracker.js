@@ -7,6 +7,9 @@
   let solutionViewed = false;
   let gptHelpUsed = false;
 
+  // Track interval IDs for cleanup
+  const activeIntervals = [];
+
   // Throttling for analytics warnings (1 minute)
   const analyticsThrottle = {
     gptButton: 0,
@@ -14,6 +17,12 @@
     twoSumHints: 0,
   };
   const THROTTLE_MS = 60000; // 1 minute
+
+  // Clean up all active intervals
+  function cleanupIntervals() {
+    activeIntervals.forEach((id) => clearInterval(id));
+    activeIntervals.length = 0;
+  }
 
   // Send integration warning to content script for analytics
   function sendIntegrationWarning(type, details) {
@@ -193,7 +202,8 @@
     }, 500);
 
     setupClickListeners();
-    setInterval(setupClickListeners, 5000); // Re-check periodically for dynamic content
+    const hintInterval = setInterval(setupClickListeners, 5000); // Re-check periodically for dynamic content
+    activeIntervals.push(hintInterval);
   }
 
   // Monitor solution tab activation
@@ -349,7 +359,8 @@
     }, 500);
 
     setupClickListeners();
-    setInterval(setupClickListeners, 5000);
+    const solutionInterval = setInterval(setupClickListeners, 5000);
+    activeIntervals.push(solutionInterval);
   }
 
   // Monitor "Ask Leet" GPT button clicks
@@ -394,25 +405,37 @@
     }, 500);
 
     setupClickListener();
-    setInterval(setupClickListener, 5000); // Re-check periodically for dynamic content
+    const gptInterval = setInterval(setupClickListener, 5000); // Re-check periodically for dynamic content
+    activeIntervals.push(gptInterval);
   }
 
   // Reset tracking when navigating to a new problem
   function setupNavigationReset() {
     let lastPathname = window.location.pathname;
 
-    setInterval(() => {
+    const navInterval = setInterval(() => {
       if (window.location.pathname !== lastPathname) {
         lastPathname = window.location.pathname;
 
         if (window.location.pathname.startsWith("/problems/")) {
+          // Clean up old intervals before setting up new ones
+          cleanupIntervals();
+
+          // Reset tracking state
           trackedHints.clear();
           solutionViewed = false;
           gptHelpUsed = false;
+
+          // Re-setup watchers with fresh intervals
+          setupHintWatchers();
+          setupSolutionWatcher();
+          setupGptWatcher();
+
           console.log("[LeetTracker] Reset hint tracking for new problem");
         }
       }
     }, 1000);
+    activeIntervals.push(navInterval);
   }
 
   // Initialize
