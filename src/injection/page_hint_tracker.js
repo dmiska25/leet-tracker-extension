@@ -8,7 +8,8 @@
   let gptHelpUsed = false;
 
   // Track interval IDs for cleanup
-  const activeIntervals = [];
+  const activeIntervals = []; // Watcher intervals that get cleaned up on navigation
+  let navigationInterval = null; // Persistent navigation watcher (never cleaned up)
 
   // Throttling for analytics warnings (1 minute)
   const analyticsThrottle = {
@@ -411,9 +412,12 @@
 
   // Reset tracking when navigating to a new problem
   function setupNavigationReset() {
+    // Only set up once - don't create duplicate navigation watchers
+    if (navigationInterval !== null) return;
+
     let lastPathname = window.location.pathname;
 
-    const navInterval = setInterval(() => {
+    navigationInterval = setInterval(() => {
       if (window.location.pathname !== lastPathname) {
         lastPathname = window.location.pathname;
 
@@ -435,7 +439,8 @@
         }
       }
     }, 1000);
-    activeIntervals.push(navInterval);
+    // Note: navigationInterval is NOT added to activeIntervals
+    // It remains persistent across navigations
   }
 
   // Initialize
