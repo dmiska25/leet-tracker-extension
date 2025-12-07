@@ -357,7 +357,37 @@ export async function enrichSubmission(
     );
   }
 
-  // 8) Run events
+  // 8) Hint usage summary
+  try {
+    const hintSummary = await buildHintSummaryForSubmission(
+      sub,
+      username,
+      startCandidatesMs
+    );
+
+    if (hintSummary && hintSummary.usedHints !== "none") {
+      sub.usedHints = hintSummary.usedHints;
+
+      console.log(
+        `[LeetTracker] Detected hint usage for submission ${sub.id} (${sub.titleSlug}): ` +
+          `${hintSummary.usedHints}` +
+          (hintSummary.viewedHints
+            ? `, hints viewed: ${hintSummary.viewedHints.join(", ")}`
+            : "")
+      );
+    } else {
+      // Explicitly set to 'none' if no hints used
+      sub.usedHints = "none";
+    }
+  } catch (err) {
+    console.warn(
+      `[LeetTracker] Hint enrichment failed for ${sub.titleSlug}:`,
+      err
+    );
+    // Don't fail the entire enrichment, just leave usedHints undefined
+  }
+
+  // 9) Run events
   try {
     const runEvents = await buildRunEventsForSubmission(
       sub,
@@ -388,6 +418,83 @@ export async function enrichSubmission(
       `[LeetTracker] Run enrichment failed for ${sub.titleSlug}:`,
       err
     );
+  }
+}
+
+// --------------- hint usage summary ---------------
+/**
+ * Query hint events in the solve window and aggregate into usedHints
+ * Priority: solution_peek > gpt_help > leetcode_hint > none
+ */
+export async function buildHintSummaryForSubmission(
+  sub,
+  username,
+  startCandidatesMs
+) {
+  if (sub.statusDisplay !== "Accepted" || !username) return null;
+
+  const endMs = sub.timestamp * 1000;
+  if (!startCandidatesMs || startCandidatesMs.length === 0) return null;
+
+  const startMs = Math.min(...startCandidatesMs);
+
+  try {
+    const events = await (
+      await getDBInstance()
+    ).getHintEventsInWindow(username, sub.titleSlug, startMs, endMs);
+
+    if (!events || events.length === 0) {
+      return {
+        usedHints: "none",
+        eventCount: 0,
+      };
+    }
+
+    // Check for solution peek (highest priority)
+    const hasSolutionPeek = events.some((e) => e.hintType === "solution_peek");
+    if (hasSolutionPeek) {
+      return {
+        usedHints: "solution_peek",
+        eventCount: events.length,
+        viewedHints: events
+          .filter((e) => e.hintType === "leetcode_hint")
+          .map((e) => e.hintNumber),
+      };
+    }
+
+    // Check for GPT help usage (second priority)
+    const hasGptHelp = events.some((e) => e.hintType === "gpt_help");
+    if (hasGptHelp) {
+      return {
+        usedHints: "gpt_help",
+        eventCount: events.length,
+        viewedHints: events
+          .filter((e) => e.hintType === "leetcode_hint")
+          .map((e) => e.hintNumber),
+      };
+    }
+
+    // Check for hint views
+    const hintEvents = events.filter((e) => e.hintType === "leetcode_hint");
+    if (hintEvents.length > 0) {
+      return {
+        usedHints: "leetcode_hint",
+        eventCount: events.length,
+        viewedHints: hintEvents.map((e) => e.hintNumber).sort((a, b) => a - b),
+      };
+    }
+
+    // Shouldn't happen if events.length > 0, but fallback to none
+    return {
+      usedHints: "none",
+      eventCount: events.length,
+    };
+  } catch (err) {
+    console.warn(
+      `[LeetTracker] Hint summary failed for ${sub.titleSlug}:`,
+      err
+    );
+    return null;
   }
 }
 
