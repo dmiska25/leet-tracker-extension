@@ -12,9 +12,10 @@
   --toast-offset-right: 3vw;
   --toast-radius: 10px;
   --toast-padding: 14px;
-  --toast-font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+  --toast-font-family:
+    system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
   --toast-z-index: 2147483647; /* very top */
-  --toast-shadow: 0 8px 30px rgba(2,6,23,0.6);
+  --toast-shadow: 0 8px 30px rgba(2, 6, 23, 0.6);
 }
 
 /* Container for all toasts injected by toast.js */
@@ -48,7 +49,9 @@
   gap: 10px;
   opacity: 0;
   transform: translateY(-8px) scale(0.98);
-  transition: opacity 220ms ease, transform 220ms ease;
+  transition:
+    opacity 220ms ease,
+    transform 220ms ease;
 }
 
 /* When visible, class .show is added by JS */
@@ -90,7 +93,7 @@
 
 /* Secondary text */
 .lt-toast .lt-toast-sub {
-  color: rgba(255,255,255,0.85);
+  color: rgba(255, 255, 255, 0.85);
   font-size: 13px;
 }
 
@@ -106,31 +109,35 @@
 .lt-toast .lt-btn {
   background: transparent;
   color: var(--toast-accent);
-  border: 1px solid rgba(255,255,255,0.15);
+  border: 1px solid rgba(255, 255, 255, 0.15);
   padding: 8px 12px;
   border-radius: 8px;
   cursor: pointer;
   text-decoration: none;
   font-size: 13px;
-  transition: background 150ms ease, border-color 150ms ease;
+  transition:
+    background 150ms ease,
+    border-color 150ms ease;
 }
 
 .lt-toast .lt-btn:hover {
   background: rgba(16, 185, 129, 0.1);
-  border-color: rgba(255,255,255,0.25);
+  border-color: rgba(255, 255, 255, 0.25);
 }
 
 /* Close button */
 .lt-toast .lt-close {
   background: transparent;
   border: none;
-  color: rgba(255,255,255,0.6);
+  color: rgba(255, 255, 255, 0.6);
   cursor: pointer;
   padding: 4px;
   border-radius: 4px;
   font-size: 16px;
   line-height: 1;
-  transition: color 150ms ease, background 150ms ease;
+  transition:
+    color 150ms ease,
+    background 150ms ease;
   width: 24px;
   height: 24px;
   display: flex;
@@ -141,14 +148,14 @@
 }
 
 .lt-toast .lt-close:hover {
-  color: rgba(255,255,255,0.9);
-  background: rgba(255,255,255,0.1);
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.1);
 }
 
 /* Timer bar at bottom */
 .lt-toast .lt-timer {
   height: 4px;
-  background: rgba(255,255,255,0.08);
+  background: rgba(255, 255, 255, 0.08);
   border-radius: 6px;
   overflow: hidden;
   position: relative;
@@ -161,7 +168,11 @@
   top: 0;
   height: 100%;
   width: 100%;
-  background: linear-gradient(90deg, var(--toast-accent), var(--toast-accent-2));
+  background: linear-gradient(
+    90deg,
+    var(--toast-accent),
+    var(--toast-accent-2)
+  );
   transform-origin: left;
   /* animation controlled via inline style duration or CSS animation */
 }

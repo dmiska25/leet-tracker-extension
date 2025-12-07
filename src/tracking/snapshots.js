@@ -13,7 +13,7 @@ import { recordProblemVisit } from "./watchers.js";
 import { getDBInstance } from "../core/db-instance.js";
 import { getAnalytics } from "../core/analytics.js";
 
-const { GRAPHQL_URL, DAY_S } = consts;
+const { GRAPHQL_URL } = consts;
 
 // Initialize diff-match-patch for use throughout the module
 const dmp = new DiffMatchPatch();
@@ -474,8 +474,8 @@ export async function cacheTemplatesForProblem(problemSlug) {
   const templatesKey = keys.getTemplatesKey
     ? keys.getTemplatesKey(problemSlug)
     : keys.templates
-    ? keys.templates(problemSlug)
-    : `leettracker_templates_${problemSlug}`;
+      ? keys.templates(problemSlug)
+      : `leettracker_templates_${problemSlug}`;
 
   const storageCached = await store.get(templatesKey, null);
   if (storageCached && Date.now() - storageCached.timestamp < 86400000) {
@@ -536,10 +536,9 @@ export async function handleFreshStartReset(
         await getDBInstance()
       ).getSnapshots(username, problemSlug);
       snapshots = snapshotData.snapshots || [];
-    } catch (error) {
+    } catch (_error) {
       return false;
     }
-
     if (snapshots.length < 1) return false;
 
     const matchesTemplate = await checkForFreshStart(currentCode, problemSlug);

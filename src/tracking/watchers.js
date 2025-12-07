@@ -85,9 +85,8 @@ export function startCodeSnapshotWatcher(username) {
 
       const slug =
         getCurrentProblemSlug() ||
-        (window.location.pathname.match(/^\/problems\/([^\/]+)\/?/) || [])[1] ||
+        (window.location.pathname.match(/^\/problems\/([^/]+)\/?/) || [])[1] ||
         null;
-
       if (!slug) {
         analytics.captureIntegrationWarning(
           "code_snapshot",
@@ -143,7 +142,7 @@ export function startProblemNavigationWatcher(username) {
   let lastSlug = null;
   navWatcherInterval = setInterval(() => {
     try {
-      const m = window.location.pathname.match(/^\/problems\/([^\/]+)\/?/);
+      const m = window.location.pathname.match(/^\/problems\/([^/]+)\/?/);
       if (!m) return;
 
       const slug = m[1];
@@ -268,7 +267,7 @@ export function startRunCodeMessageBridge(username) {
         const { interpret_id, data, meta } = d.payload || {};
         const problemSlug =
           getCurrentProblemSlug() ||
-          (window.location.pathname.match(/^\/problems\/([^\/]+)\/?/) ||
+          (window.location.pathname.match(/^\/problems\/([^/]+)\/?/) ||
             [])[1] ||
           "unknown";
 
@@ -421,7 +420,7 @@ export function startHintMessageBridge(username) {
         const { hintType, hintNumber, timestamp } = d.payload || {};
         const problemSlug =
           getCurrentProblemSlug() ||
-          (window.location.pathname.match(/^\/problems\/([^\/]+)\/?/) ||
+          (window.location.pathname.match(/^\/problems\/([^/]+)\/?/) ||
             [])[1] ||
           "unknown";
 

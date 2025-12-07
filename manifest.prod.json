@@ -15,9 +15,7 @@
       "js": ["src/ui/toast/toast.js", "src/injection/content.js"]
     },
     {
-      "matches": [
-        "https://leet-tracker-log.vercel.app/*"
-      ],
+      "matches": ["https://leet-tracker-log.vercel.app/*"],
       "js": ["src/injection/webapp.js"],
       "run_at": "document_start"
     }

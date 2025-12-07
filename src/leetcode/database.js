@@ -1,8 +1,7 @@
 // src/leetcode/database.js
-import { consts, keys, store } from "../core/config.js";
+import { keys, store } from "../core/config.js";
 import { fetchProblemDescription, getUserInfoWithCache } from "./api.js";
 
-const { GRAPHQL_URL } = consts;
 const PKEY = keys.problemIdMap;
 
 // In-memory slug -> questionId cache for this content-script lifetime
@@ -52,7 +51,7 @@ export async function exploreLeetCodeIndexedDB() {
  * Extract current problem slug from location pathname.
  */
 export function getCurrentProblemSlug() {
-  const m = window.location.pathname.match(/^\/problems\/([^\/]+)\/?/);
+  const m = window.location.pathname.match(/^\/problems\/([^/]+)\/?/);
   return m ? m[1] : null;
 }
 
@@ -79,11 +78,9 @@ export async function getProblemIdFromSlug(problemSlug) {
       slugToId.set(problemSlug, pid);
       return pid;
     }
-  } catch (e) {
+  } catch (_e) {
     // continue to network fetch
-  }
-
-  // 3) Network fetch for question detail
+  } // 3) Network fetch for question detail
   let question = null;
   try {
     question = await fetchProblemDescription(problemSlug);

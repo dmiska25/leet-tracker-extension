@@ -16,10 +16,7 @@
       "js": ["src/ui/toast/toast.js", "src/injection/content.js"]
     },
     {
-      "matches": [
-        "https://*.vercel.app/*",
-        "http://localhost:5173/"
-      ],
+      "matches": ["https://*.vercel.app/*", "http://localhost:5173/"],
       "js": ["src/injection/webapp.js"],
       "run_at": "document_start"
     }

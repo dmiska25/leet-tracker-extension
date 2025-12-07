@@ -1,5 +1,4 @@
 // src/core/storage.js
-import { keys, store } from "./config.js";
 
 // IndexedDB wrapper for larger data storage
 class LeetTrackerDB {
@@ -178,7 +177,10 @@ class LeetTrackerDB {
                   const firstKey = Object.keys(seenData)[0];
                   if (
                     firstKey &&
-                    !seenData[firstKey].hasOwnProperty("isPremium")
+                    !Object.prototype.hasOwnProperty.call(
+                      seenData[firstKey],
+                      "isPremium"
+                    )
                   ) {
                     // Old object format without isPremium
                     needsMigration = true;
@@ -235,7 +237,10 @@ class LeetTrackerDB {
                 });
 
                 // Only update if manifest exists and doesn't already have total field
-                if (manifest && !manifest.hasOwnProperty("total")) {
+                if (
+                  manifest &&
+                  !Object.prototype.hasOwnProperty.call(manifest, "total")
+                ) {
                   const username = manifestKey.replace(
                     "leettracker_sync_manifest_",
                     ""
@@ -374,10 +379,10 @@ class LeetTrackerDB {
         startMs != null && endMs != null
           ? IDBKeyRange.bound(startMs, endMs)
           : startMs != null
-          ? IDBKeyRange.lowerBound(startMs)
-          : endMs != null
-          ? IDBKeyRange.upperBound(endMs)
-          : null;
+            ? IDBKeyRange.lowerBound(startMs)
+            : endMs != null
+              ? IDBKeyRange.upperBound(endMs)
+              : null;
 
       const runs = [];
       const req = range ? idx.openCursor(range) : idx.openCursor();
@@ -521,10 +526,10 @@ class LeetTrackerDB {
         startMs != null && endMs != null
           ? IDBKeyRange.bound(startMs, endMs)
           : startMs != null
-          ? IDBKeyRange.lowerBound(startMs)
-          : endMs != null
-          ? IDBKeyRange.upperBound(endMs)
-          : null;
+            ? IDBKeyRange.lowerBound(startMs)
+            : endMs != null
+              ? IDBKeyRange.upperBound(endMs)
+              : null;
 
       const events = [];
       const req = range ? idx.openCursor(range) : idx.openCursor();

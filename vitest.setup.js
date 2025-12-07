@@ -1,4 +1,4 @@
-import { vi } from 'vitest';
+import { vi } from "vitest";
 
 // Mock chrome.storage.local API
 global.chrome = {
@@ -21,8 +21,8 @@ global.chrome = {
   },
   runtime: {
     getManifest: vi.fn(() => ({
-      version: '0.1.1',
-      name: 'LeetTracker Dev',
+      version: "0.1.1",
+      name: "LeetTracker Dev",
     })),
     getURL: vi.fn((path) => `chrome-extension://fake-extension-id/${path}`),
   },
@@ -36,15 +36,16 @@ if (!global.crypto) {
         // Simple mock implementation for testing
         // In real tests, happy-dom should provide this
         const encoder = new TextEncoder();
-        const dataArray = data instanceof Uint8Array ? data : encoder.encode(data);
-        
+        const dataArray =
+          data instanceof Uint8Array ? data : encoder.encode(data);
+
         // Create a simple hash for testing (not cryptographically secure)
         let hash = 0;
         for (let i = 0; i < dataArray.length; i++) {
-          hash = ((hash << 5) - hash) + dataArray[i];
+          hash = (hash << 5) - hash + dataArray[i];
           hash |= 0;
         }
-        
+
         // Return ArrayBuffer with 32 bytes (SHA-256 size)
         const buffer = new ArrayBuffer(32);
         const view = new DataView(buffer);
