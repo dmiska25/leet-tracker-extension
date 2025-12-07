@@ -642,6 +642,53 @@ describe("syncSubmissions", () => {
     });
   });
 
+  it("handles empty first sync followed by sync with submissions", async () => {
+    // This test ensures chunkIdx calculation handles undefined/0 chunkCount correctly
+    // Scenario: User's first sync has no submissions, second sync has submissions
+
+    // FIRST SYNC: No submissions
+    vi.mocked(api.fetchAllSubmissions).mockResolvedValue([]);
+
+    const firstResult = await syncSubmissions("testuser");
+
+    expect(firstResult.success).toBe(true);
+    expect(firstResult.newSolves).toBe(0);
+    expect(firstResult.isFirstSync).toBe(true);
+
+    // Verify manifest was initialized with chunkCount: 0
+    let manifest = mockStorage.get("leettracker_sync_manifest_testuser");
+    expect(manifest.chunkCount).toBe(0);
+    expect(manifest.totalSynced).toBe(0);
+
+    // SECOND SYNC: Now user has submissions
+    const now = Math.floor(Date.now() / 1000);
+    const submissions = Array.from({ length: 3 }, (_, i) => ({
+      id: `sub${i}`,
+      titleSlug: `problem-${i}`,
+      timestamp: now - i * 100,
+      statusDisplay: "Accepted",
+    }));
+
+    vi.mocked(api.fetchAllSubmissions).mockResolvedValue(submissions);
+
+    const secondResult = await syncSubmissions("testuser");
+
+    expect(secondResult.success).toBe(true);
+    expect(secondResult.newSolves).toBe(3);
+
+    // Verify chunk was created at index 0 (not NaN or -1)
+    const chunk = mockStorage.get("leettracker_leetcode_chunk_testuser_0");
+    expect(chunk).toBeDefined();
+    expect(chunk.length).toBe(3);
+
+    // Verify manifest was updated correctly
+    manifest = mockStorage.get("leettracker_sync_manifest_testuser");
+    expect(manifest.chunkCount).toBe(1); // Should be 1, not 0
+    expect(manifest.totalSynced).toBe(3);
+    expect(manifest.chunks[0]).toBeDefined();
+    expect(manifest.chunks[0].index).toBe(0); // Verify index is 0, not NaN
+  });
+
   it("splits old submissions into backfill queue", async () => {
     // NOTE: The sync logic iterates through submissions in order and counts how many
     // are older than the cutoff (skippedForBackfill). It then queues the first N items
