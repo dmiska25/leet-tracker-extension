@@ -567,10 +567,9 @@ export function getUserInfoWithCache(maxAttempts = 4) {
 
           return { ...cachedUserInfo, signInFailed: false, isFirstSignIn };
         }
-      } catch (e) {
+      } catch (_e) {
         // continue to retry
       }
-
       console.warn(
         `[LeetTracker] Failed to fetch user sign-in status, retrying in ${delay}ms`
       );

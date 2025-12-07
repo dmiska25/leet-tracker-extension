@@ -164,7 +164,9 @@ import "./toast.css";
       setTimeout(() => {
         try {
           el.remove();
-        } catch (e) {}
+        } catch (_e) {
+          // Ignore if element is already removed
+        }
         resolvePromise(reason);
       }, 260);
     };
@@ -267,7 +269,9 @@ import "./toast.css";
       setTimeout(() => {
         try {
           el.remove();
-        } catch (e) {}
+        } catch (_e) {
+          // Ignore if element is already removed
+        }
         resolvePromise(reason);
       }, 260);
     };
@@ -371,7 +375,9 @@ import "./toast.css";
       setTimeout(() => {
         try {
           el.remove();
-        } catch (e) {}
+        } catch (_e) {
+          // Ignore if element is already removed
+        }
         resolvePromise(reason);
       }, 260);
     };

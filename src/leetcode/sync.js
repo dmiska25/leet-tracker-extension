@@ -14,10 +14,6 @@ import {
   updateSyncHeartbeatOrFail,
   sessionId,
 } from "../core/locks.js";
-import {
-  takeCodeSnapshot,
-  reconstructCodeFromSnapshots,
-} from "../tracking/snapshots.js";
 import { getDBInstance } from "../core/db-instance.js";
 import { getAnalytics } from "../core/analytics.js";
 

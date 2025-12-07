@@ -118,11 +118,14 @@ function trySyncIfLoggedIn() {
         });
 
         // Periodic sync with toast
-        setInterval(() => {
-          syncSubmissions(username).then((result) => {
-            showToastAfterSync(result, username);
-          });
-        }, 1 * 60 * 1000);
+        setInterval(
+          () => {
+            syncSubmissions(username).then((result) => {
+              showToastAfterSync(result, username);
+            });
+          },
+          1 * 60 * 1000
+        );
         setInterval(() => {
           if (!window.location.pathname.startsWith("/problems/")) return;
 

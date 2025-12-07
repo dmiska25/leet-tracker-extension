@@ -1,10 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import {
-  processBackfillQueue,
-  syncSubmissions,
-  enrichSubmission,
-} from "./sync.js";
-import { store } from "../core/config.js";
+import { processBackfillQueue, syncSubmissions } from "./sync.js";
 import * as locks from "../core/locks.js";
 import * as api from "./api.js";
 import * as analytics from "../core/analytics.js";

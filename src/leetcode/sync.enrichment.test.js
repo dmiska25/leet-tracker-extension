@@ -5,7 +5,6 @@ import {
   flushChunk,
   enrichSubmission,
 } from "./sync.js";
-import { store } from "../core/config.js";
 
 // Mock the storage and DB dependencies
 vi.mock("../core/db-instance.js", () => ({

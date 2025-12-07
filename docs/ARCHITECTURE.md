@@ -28,57 +28,58 @@ graph TB
         Webapp[WebApp Bridge<br/>injection/webapp.js]
         PageInject[Page Inject<br/>injection/page.js]
     end
-    
+
     subgraph "Core Services"
         Config[Config<br/>core/config.js]
         Storage[IndexedDB<br/>core/storage.js]
         Locks[Sync Locks<br/>core/locks.js]
         DBInstance[DB Singleton<br/>core/db-instance.js]
     end
-    
+
     subgraph "LeetCode Integration"
         API[LeetCode API<br/>leetcode/api.js]
         Database[LC IndexedDB<br/>leetcode/database.js]
         Sync[Submission Sync<br/>leetcode/sync.js]
     end
-    
+
     subgraph "Tracking Features"
         Snapshots[Code Snapshots<br/>tracking/snapshots.js]
         Watchers[UI Watchers<br/>tracking/watchers.js]
     end
-    
+
     subgraph "External Systems"
         LC[LeetCode.com]
         LCDB[(LeetCode's<br/>IndexedDB)]
         WebApp[LeetTracker<br/>Web App]
     end
-    
+
     Content --> Config
     Content --> DBInstance
     Content --> Sync
     Content --> Watchers
-    
+
     Watchers --> Snapshots
     Watchers --> Database
-    
+
     Sync --> API
     Sync --> Locks
     Sync --> Snapshots
-    
+
     Snapshots --> Storage
     Snapshots --> Database
-    
+
     API --> LC
     Database --> LCDB
-    
+
     Webapp --> WebApp
-    
+
     PageInject -.->|postMessage| Watchers
-    
+
     DBInstance --> Storage
 ```
 
 **Key Design Decision**: Modular architecture with clear separation of concerns:
+
 - **Injection Layer**: Handles Chrome extension contexts (content script, page script, webapp bridge)
 - **Core Layer**: Reusable utilities (config, storage, locks, singleton DB)
 - **Integration Layer**: LeetCode-specific APIs and data access
@@ -121,6 +122,7 @@ src/
 ```
 
 **Key Design Decision**: Grouped by feature/responsibility instead of flat structure. Makes it easy to:
+
 - Find related code quickly
 - Understand dependencies (imports show layer boundaries)
 - Scale as features grow
@@ -145,14 +147,14 @@ sequenceDiagram
 
     User->>LeetCode: Submit solution
     LeetCode-->>Content: Page loads/navigates
-    
+
     Content->>Sync: syncSubmissions(username)
     Sync->>Locks: acquireSyncLock()
-    
+
     alt Lock acquired
         Locks-->>Sync: Lock granted (this tab)
         Sync->>API: fetchAllSubmissions(username)
-        
+
         loop For each submission
             Sync->>Sync: enrichSubmission()
             Sync->>API: fetchProblemDescription()
@@ -161,19 +163,20 @@ sequenceDiagram
             Sync->>Sync: deriveSolveWindow()
             Sync->>DB: storeJourneyArchive()
         end
-        
+
         Sync->>Locks: releaseSyncLock()
     else Lock already held (other tab)
         Locks-->>Sync: Lock denied
         Sync->>Sync: Skip (other tab syncing)
     end
-    
+
     WebApp->>Content: Request sync (postMessage)
     Content->>DB: Read journey data
     Content->>WebApp: Send data (postMessage)
 ```
 
 **Key Design Decisions**:
+
 - **Cross-tab locking**: Prevents duplicate API calls when multiple LeetCode tabs are open
 - **Heartbeat mechanism**: Lock expires after 3 minutes of inactivity (handles crashed tabs)
 - **Incremental sync**: Only fetches new submissions, caches manifest of synced IDs
@@ -191,33 +194,34 @@ To prevent slow initial syncs for users with many historical submissions, the ex
 ```mermaid
 flowchart TB
     Start[Sync triggered] --> Fetch[Fetch new submissions]
-    
+
     Fetch --> CheckNew{Any new<br/>submissions?}
-    
+
     CheckNew -->|No| CheckQueue{Backfill queue<br/>has items?}
     CheckNew -->|Yes| CheckAge{Check submission age}
-    
+
     CheckAge -->|< 30 days old| Recent[Recent submissions]
     CheckAge -->|> 30 days old| Old[Old submissions]
-    
+
     Recent --> Enrich[Enrich immediately]
     Enrich --> Process[Full enrichment:<br/>- Problem description<br/>- Personal notes<br/>- Code details<br/>- Solve window<br/>- Run events]
     Process --> Store1[Store in chunks]
     Store1 --> Done[Sync complete]
-    
+
     Old --> Queue[Add to backfill queue]
     Queue --> Store2[Store basic data only]
     Store2 --> Done
-    
+
     CheckQueue -->|Yes| ProcessBackfill[Process 20 submissions<br/>from queue]
     CheckQueue -->|No| Done
-    
+
     ProcessBackfill --> EnrichBackfill[Enrich queued submissions]
     EnrichBackfill --> UpdateChunks[Update chunks in storage]
     UpdateChunks --> Done
 ```
 
 **Key Design Decisions**:
+
 - **90-day cutoff**: Submissions older than 90 days are queued for backfill (balances UX vs performance, matches webapp computation limit)
 - **Immediate storage**: Old submissions still stored with basic data (id, titleSlug, timestamp)
 - **Lazy enrichment**: Queue processed only when no new submissions detected (prioritizes fresh data)
@@ -228,6 +232,7 @@ flowchart TB
 - **Heartbeat protected**: Each backfill item updates heartbeat to maintain lock
 
 **Example Timeline**:
+
 - User with 500 submissions syncs for first time
 - Submissions from last 90 days (e.g., 100) enriched immediately → ~1-2 minutes
 - Remaining 400 queued for backfill, stored with basic data
@@ -248,25 +253,25 @@ sequenceDiagram
     participant Snap as tracking/snapshots.js
     participant LCDB as LC IndexedDB
     participant DB as Our IndexedDB
-    
+
     User->>LC: Types code in editor
-    
+
     loop Every 500ms
         Watcher->>Snap: getCurrentCode()
         Snap->>LCDB: getCodeFromLeetCodeDB()
         LCDB-->>Snap: Current code
-        
+
         Snap->>Snap: shouldTakeSnapshot(oldCode, newCode)
-        
+
         alt Significant change (30+ chars or 2+ lines)
             Snap->>Snap: normalizeText(code)
             Snap->>Snap: makePatch(before, after)
-            
+
             Note over Snap: Using Google's<br/>diff-match-patch library
-            
+
             Snap->>Snap: createChecksum(code)
             Snap->>DB: getSnapshots(username, problemSlug)
-            
+
             alt First snapshot or checkpoint needed
                 Snap->>DB: storeSnapshots(fullCode)
                 Note over DB: Full snapshot stored
@@ -274,9 +279,9 @@ sequenceDiagram
                 Snap->>DB: storeSnapshots(patchText, checksums)
                 Note over DB: Only diff stored (space efficient)
             end
-            
+
             Snap->>Snap: applyPatch() to verify
-            
+
             alt Patch verification failed
                 Snap->>DB: Store full code instead
                 Note over Snap: Fallback to safety
@@ -288,6 +293,7 @@ sequenceDiagram
 ```
 
 **Key Design Decisions**:
+
 - **Diff-based storage**: Stores only changes (patches) to save space, falls back to full snapshots every N changes
 - **Checksum validation**: Ensures patches can be applied correctly before storing
 - **Threshold filtering**: Avoids spam snapshots for small typos (30 chars or 2 lines changed)
@@ -306,27 +312,27 @@ sequenceDiagram
     participant PageInject as injection/page.js
     participant Watcher as tracking/watchers.js
     participant DB as IndexedDB
-    
+
     Note over PageInject: Injected into page context<br/>(has access to window.fetch)
-    
+
     PageInject->>PageInject: Intercept window.fetch()
-    
+
     User->>LC: Click "Run Code"
     LC->>PageInject: fetch('/problems/x/interpret_solution/')
-    
+
     PageInject->>PageInject: Capture request metadata
     Note over PageInject: interpretId, questionId,<br/>typed_code, lang, data_input
-    
+
     PageInject->>LC: Forward request (original fetch)
     LC-->>PageInject: Response with results
-    
+
     PageInject->>PageInject: Parse response
     Note over PageInject: state, status_msg, total_correct,<br/>runtime, memory, etc.
-    
+
     PageInject->>Watcher: postMessage({<br/>  type: 'lt-run-result',<br/>  payload: {...}<br/>})
-    
+
     Watcher->>Watcher: Validate message source
-    
+
     alt Valid message
         Watcher->>DB: storeRunEvent(username, problemSlug, runRecord)
         Note over DB: Stored with timestamp<br/>for solve-window grouping
@@ -334,6 +340,7 @@ sequenceDiagram
 ```
 
 **Key Design Decisions**:
+
 - **Page context injection**: Only way to intercept `window.fetch` (content scripts can't)
 - **postMessage communication**: Bridges page context → content script securely
 - **Source validation**: Checks `event.source === window` and `source === "leettracker"`
@@ -352,18 +359,18 @@ sequenceDiagram
     participant Analytics as core/analytics.js
     participant PostHog as PostHog Cloud
     participant Queue as Event Queue
-    
+
     User->>Extension: Performs action
     Extension->>Analytics: capture(event, properties)
-    
+
     Analytics->>Analytics: Check if initialized
-    
+
     alt Not initialized
         Analytics->>Queue: Add to pending queue
         Note over Queue: Max 100 events
     else Initialized
         Analytics->>Analytics: Apply throttling
-        
+
         alt Event throttled
             Analytics->>Analytics: Skip event
         else Event allowed
@@ -371,16 +378,17 @@ sequenceDiagram
             Note over PostHog: Anonymous event tracking
         end
     end
-    
+
     Note over Analytics: Async initialization on load
     Analytics->>PostHog: Initialize SDK
     PostHog-->>Analytics: Ready
-    
+
     Analytics->>Queue: Flush pending events
     Queue->>PostHog: Send queued events
 ```
 
 **Key Design Decisions**:
+
 - **Async initialization**: Analytics loads in background, doesn't block extension startup
 - **Event queue**: Buffers up to 100 events before initialization completes
 - **Throttling**: Prevents spam for high-frequency events (e.g., sync checks every minute)
@@ -390,6 +398,7 @@ sequenceDiagram
 - **Environment awareness**: Tracks dev vs prod environment in events
 
 **Events Tracked**:
+
 - Extension sessions (started, anonymous)
 - Sync operations (completed, failed, no new submissions)
 - Backfill progress (items processed, remaining)
@@ -406,9 +415,9 @@ sequenceDiagram
     participant Extension
     participant Toast as ui/toast/toast.js
     participant DOM
-    
+
     Extension->>Extension: Trigger condition met
-    
+
     alt Welcome Toast (First Sign-In)
         Extension->>Toast: showWelcomeToast({username, durationMs})
         Toast->>DOM: Create toast element
@@ -423,11 +432,11 @@ sequenceDiagram
         Toast->>DOM: Create toast element
         Note over DOM: "Completed sync<br/>X solves added"
     end
-    
+
     Toast->>DOM: Inject into container (top-right)
     Toast->>DOM: Apply show animation
     Toast->>DOM: Start timer bar animation
-    
+
     alt User clicks close
         User->>Toast: Click close button
         Toast->>DOM: Remove toast
@@ -438,6 +447,7 @@ sequenceDiagram
 ```
 
 **Key Design Decisions**:
+
 - **Dependency-free**: Pure JavaScript/CSS, no external UI libraries
 - **Non-blocking**: Toasts don't interrupt user workflow
 - **Stacked display**: Multiple toasts stack vertically (newest on top)
@@ -448,6 +458,7 @@ sequenceDiagram
 - **Accessibility**: ARIA labels, semantic HTML, keyboard support
 
 **Toast Types**:
+
 1. **Welcome Toast** (15s): Shown once on first sign-in, includes username
 2. **Sign-In Required Toast** (15s): Shown when sign-in fails after retries
 3. **Sync Complete Toast** (5s): Shown after successful sync with new submissions
@@ -459,40 +470,41 @@ sequenceDiagram
 ```mermaid
 flowchart TD
     Start[User on problem page] --> Poll[Poll every 500ms]
-    
+
     Poll --> GetCode[Get current code]
     GetCode --> CheckSnaps{Has previous<br/>snapshots?}
-    
+
     CheckSnaps -->|No| Skip[Skip check]
     CheckSnaps -->|Yes| FetchTemplates[Fetch problem templates]
-    
+
     FetchTemplates --> CacheCheck{Templates<br/>cached?}
-    
+
     CacheCheck -->|No| FetchAPI[fetchProblemDescription API]
     FetchAPI --> ParseTemplates[Extract code templates<br/>by language]
     ParseTemplates --> CacheTemplates[Store in IndexedDB]
     CacheTemplates --> Compare
-    
+
     CacheCheck -->|Yes| Compare[Compare current code<br/>to template]
-    
+
     Compare --> CalcSimilarity[calculateCodeSimilarity<br/>using diff-match-patch]
-    
+
     CalcSimilarity --> Threshold{Similarity<br/>>= 98%?}
-    
+
     Threshold -->|Yes| CheckCount{Only 1<br/>snapshot?}
     Threshold -->|No| Skip
-    
+
     CheckCount -->|Yes| Skip
     CheckCount -->|No| RecordVisit[recordProblemVisit]
-    
+
     RecordVisit --> ClearSnaps[Clear all snapshots]
     ClearSnaps --> Log[Log: Fresh start detected]
     Log --> Skip
-    
+
     Skip --> Poll
 ```
 
 **Key Design Decisions**:
+
 - **Template caching**: Fetches problem starter code once, caches in IndexedDB (avoids API spam)
 - **98% similarity threshold**: Allows minor whitespace differences, catches actual resets
 - **Minimum 2 snapshots**: Don't treat first snapshot as "reset" (user just started)
@@ -514,7 +526,7 @@ erDiagram
         array snapshots "Array of snapshot objects"
         string lastFinalCode "Last known full code"
     }
-    
+
     SNAPSHOT_ARRAY {
         number timestamp
         string fullCode "Optional: full snapshot"
@@ -523,13 +535,13 @@ erDiagram
         string checksumAfter
         string lang
     }
-    
+
     JOURNEYS ||--o{ SUBMISSION : contains
     JOURNEYS {
         string key "username|submissionId"
         object submission "Enriched submission data"
     }
-    
+
     SUBMISSION {
         string id
         string titleSlug
@@ -542,7 +554,7 @@ erDiagram
         string problemNote
         array runEvents "Associated run code attempts"
     }
-    
+
     RUN_EVENTS {
         string key "username|timestamp"
         string problemSlug
@@ -556,7 +568,7 @@ erDiagram
         number runtime
         number memory
     }
-    
+
     TEMPLATES {
         string key "problemSlug"
         array templates "Code templates by language"
@@ -564,6 +576,7 @@ erDiagram
 ```
 
 **Key Design Decisions**:
+
 - **Composite keys**: `username|problemSlug` allows multi-user data in same browser
 - **Sparse snapshots**: Only store full code at checkpoints, patches in between (space efficient)
 - **Denormalized journeys**: Each submission is self-contained (no joins needed)
@@ -580,21 +593,21 @@ erDiagram
     timestamp: 1699123456789,
     heartbeat: 1699123466789
   },
-  
+
   // Problem ID mapping cache
   "leettracker_problem_id_map": {
     "two-sum": "1",
     "add-two-numbers": "2",
     // ... slug -> questionId mapping
   },
-  
+
   // Visit log for solve windows
   "leettracker_problem_visit_log_username123": [
     { slug: "two-sum", ts: 1699123400 },
     { slug: "add-two-numbers", ts: 1699123500 }
     // Last 24 hours only
   ],
-  
+
   // Sync manifest (which submissions already processed)
   "leettracker_submissions_manifest_username123": {
     lastSync: 1699123456789,
@@ -604,6 +617,7 @@ erDiagram
 ```
 
 **Key Design Decisions**:
+
 - **Chrome storage for small, frequently accessed data**: Faster than IndexedDB for tiny objects
 - **IndexedDB for large data**: Better for snapshots, submission details, run events
 - **Visit log pruning**: Only keep last 24 hours (determines solve window)
@@ -618,36 +632,36 @@ erDiagram
 ```mermaid
 stateDiagram-v2
     [*] --> Idle
-    
+
     Idle --> CheckLock: syncSubmissions() called
-    
+
     CheckLock --> AcquireLock: No lock exists
     CheckLock --> CheckHeartbeat: Lock exists
-    
+
     CheckHeartbeat --> AcquireLock: Heartbeat expired (>3 min)
     CheckHeartbeat --> Idle: Valid heartbeat (other tab owns)
-    
+
     AcquireLock --> Owned: Lock acquired
-    
+
     Owned --> UpdateHeartbeat: Every 30 seconds
     UpdateHeartbeat --> Owned
-    
+
     Owned --> FetchData: Start sync
     FetchData --> ProcessSubmissions
     ProcessSubmissions --> EnrichSubmission
     EnrichSubmission --> ProcessSubmissions: More submissions
     EnrichSubmission --> ReleaseLock: All done
-    
+
     ReleaseLock --> Idle
-    
+
     Owned --> ForceRelease: Tab closes
     ForceRelease --> [*]
-    
+
     note right of CheckHeartbeat
         Prevents duplicate API calls
         when multiple tabs open
     end note
-    
+
     note right of UpdateHeartbeat
         Keeps lock alive while
         actively syncing
@@ -655,6 +669,7 @@ stateDiagram-v2
 ```
 
 **Key Design Decisions**:
+
 - **Session-based ownership**: Each tab has unique session ID (random UUID)
 - **Heartbeat mechanism**: Lock owner updates timestamp every 30s during sync
 - **Timeout protection**: Lock expires after 3 minutes (handles crashed tabs)
@@ -666,18 +681,19 @@ stateDiagram-v2
 ```mermaid
 flowchart LR
     Submission[New Submission] --> CheckVisits{Problem visited<br/>in last 24h?}
-    
+
     CheckVisits -->|No| NoWindow[solveWindow: null]
     CheckVisits -->|Yes| GetVisits[Get visit log entries]
-    
+
     GetVisits --> FindFirst[Find first visit<br/>for this problem]
     FindFirst --> CalcWindow[Calculate solve window:<br/>startedAt, completedAt, duration]
-    
+
     CalcWindow --> StoreJourney[Store in journey archive]
     NoWindow --> StoreJourney
 ```
 
 **Key Design Decisions**:
+
 - **Visit-based tracking**: Records when user opens a problem page
 - **24-hour window**: Only considers visits in last day (prevents stale data)
 - **First visit wins**: Start time is earliest visit for that problem
@@ -692,21 +708,22 @@ flowchart LR
 
 The extension runs several concurrent processes to track your LeetCode activity:
 
-| Process | Purpose | Trigger | Frequency |
-|---------|---------|---------|-----------|
-| **Extension Initialization** | Sets up database, watchers, analytics, and sync on page load | Page load on leetcode.com | Once per page load |
-| **Submission Sync** | Fetches and enriches new submissions from LeetCode API | Page load, navigation, interval | Every 1 minute + on navigation |
-| **Backfill Queue Processing** | Enriches older (>90 day) submissions during idle time | When no new submissions found | During idle syncs only |
-| **Code Snapshot Watcher** | Captures code changes with diff-based patches | Editor content changes | Every 500ms (when significant change) |
-| **Fresh Start Detector** | Detects when user resets to starter code | Editor content changes | Every 500ms (polling) |
-| **Problem Navigation Watcher** | Tracks when user visits a problem page | URL changes, DOM mutations | Continuous (MutationObserver) |
-| **Submit Button Hook** | Intercepts submission events | Submit button click | Event-driven |
-| **Run Code Tracker** | Captures "Run Code" attempts and results | Run Code button click | Event-driven (via page script) |
-| **Run Code Message Bridge** | Receives run events from page context | postMessage from page script | Event-driven (message listener) |
-| **Analytics Tracking** | Sends usage events to PostHog for monitoring | Various events (sync, errors, sessions) | Event-driven (throttled) |
-| **Toast Notifications** | Displays user feedback (welcome, sync status, sign-in) | First sign-in, sync complete, sign-in failure | Event-driven |
+| Process                        | Purpose                                                      | Trigger                                       | Frequency                             |
+| ------------------------------ | ------------------------------------------------------------ | --------------------------------------------- | ------------------------------------- |
+| **Extension Initialization**   | Sets up database, watchers, analytics, and sync on page load | Page load on leetcode.com                     | Once per page load                    |
+| **Submission Sync**            | Fetches and enriches new submissions from LeetCode API       | Page load, navigation, interval               | Every 1 minute + on navigation        |
+| **Backfill Queue Processing**  | Enriches older (>90 day) submissions during idle time        | When no new submissions found                 | During idle syncs only                |
+| **Code Snapshot Watcher**      | Captures code changes with diff-based patches                | Editor content changes                        | Every 500ms (when significant change) |
+| **Fresh Start Detector**       | Detects when user resets to starter code                     | Editor content changes                        | Every 500ms (polling)                 |
+| **Problem Navigation Watcher** | Tracks when user visits a problem page                       | URL changes, DOM mutations                    | Continuous (MutationObserver)         |
+| **Submit Button Hook**         | Intercepts submission events                                 | Submit button click                           | Event-driven                          |
+| **Run Code Tracker**           | Captures "Run Code" attempts and results                     | Run Code button click                         | Event-driven (via page script)        |
+| **Run Code Message Bridge**    | Receives run events from page context                        | postMessage from page script                  | Event-driven (message listener)       |
+| **Analytics Tracking**         | Sends usage events to PostHog for monitoring                 | Various events (sync, errors, sessions)       | Event-driven (throttled)              |
+| **Toast Notifications**        | Displays user feedback (welcome, sync status, sign-in)       | First sign-in, sync complete, sign-in failure | Event-driven                          |
 
 **Process Relationships**:
+
 - **Submission Sync** populates the journey archive with historical data
 - **Code Snapshot Watcher** captures live coding activity linked to submissions via solve window
 - **Fresh Start Detector** clears snapshots when user starts over, updates visit log
@@ -727,22 +744,22 @@ sequenceDiagram
     participant DBInit as core/db-instance.js
     participant Watchers as tracking/watchers.js
     participant Toast as ui/toast/toast.js
-    
+
     Browser->>Manifest: Load extension
     Manifest->>Content: Inject content script
-    
+
     Content->>Content: Check if leetcode.com
-    
+
     alt On LeetCode
         Content->>DBInit: getDBInstance()
         DBInit->>DBInit: Initialize IndexedDB
         DBInit-->>Content: DB ready
-        
+
         Content->>Analytics: initAnalytics() (async)
         Note over Analytics: Loads in background
-        
+
         Content->>Content: getUserInfoWithCache()
-        
+
         alt User logged in (first time)
             Content->>Analytics: identify(username)
             Content->>Analytics: capture("extension_session_started")
@@ -752,10 +769,10 @@ sequenceDiagram
             Content->>Watchers: startCodeSnapshotWatcher()
             Content->>Watchers: startFreshStartWatcher()
             Content->>Watchers: injectRunCodeWatcher()
-            
+
             Note over Watchers: Wait for DOM ready
             Watchers->>Watchers: Inject page.js script
-            
+
             Content->>Watchers: startRunCodeMessageBridge()
             Content->>Content: Start intervals (sync, hook submit)
         else User logged in (returning)
@@ -775,6 +792,7 @@ sequenceDiagram
 ```
 
 **Key Design Decisions**:
+
 - **Lazy initialization**: Only init DB and watchers if on LeetCode and logged in
 - **Singleton DB**: getDBInstance() ensures only one DB connection across all modules
 - **DOM ready check**: injectRunCodeWatcher waits for DOMContentLoaded if needed
@@ -788,13 +806,15 @@ sequenceDiagram
 async function enrichSubmission(submission, username) {
   // 1. Basic submission data (already have)
   const enriched = { ...submission };
-  
+
   // 2. Fetch problem description (title, content, difficulty)
-  enriched.problemDescription = await fetchProblemDescription(submission.titleSlug);
-  
+  enriched.problemDescription = await fetchProblemDescription(
+    submission.titleSlug
+  );
+
   // 3. Fetch user's personal note for this problem
   enriched.problemNote = await fetchNoteSafe(submission.titleSlug);
-  
+
   // 4. Fetch full submission details (code, runtime, memory)
   if (!enriched.code) {
     const details = await fetchSubmissionDetailsSafe(submission.id);
@@ -802,10 +822,10 @@ async function enrichSubmission(submission, username) {
     enriched.runtime = details.runtime;
     enriched.memory = details.memory;
   }
-  
+
   // 5. Derive solve window from visit log
   enriched.solveWindow = await deriveSolveWindow(username, submission);
-  
+
   // 6. Attach run events from same time period
   if (enriched.solveWindow) {
     enriched.runEvents = await getRunEventsInWindow(
@@ -815,15 +835,16 @@ async function enrichSubmission(submission, username) {
       enriched.solveWindow.completedAt
     );
   }
-  
+
   // 7. Fetch code snapshots for this problem
   enriched.snapshots = await getSnapshots(username, submission.titleSlug);
-  
+
   return enriched;
 }
 ```
 
 **Key Design Decisions**:
+
 - **Progressive enhancement**: Each step adds more detail, but failures don't break the whole pipeline
 - **Safe wrappers**: `fetchNoteSafe`, `fetchSubmissionDetailsSafe` catch errors and return null
 - **Retry logic**: All API calls use exponential backoff (network resilience)
@@ -840,6 +861,7 @@ async function enrichSubmission(submission, username) {
 The extension uses PostHog for privacy-focused analytics to understand usage patterns and improve reliability.
 
 **Implementation Details**:
+
 - **Location**: `src/core/analytics.js`
 - **Initialization**: Async on extension load, doesn't block startup
 - **Event Queue**: Buffers up to 100 events before PostHog loads
@@ -847,12 +869,14 @@ The extension uses PostHog for privacy-focused analytics to understand usage pat
 - **Error Tracking**: Automatic capture with context and metadata
 
 **Privacy Design**:
+
 - Anonymous user identification (hashed username)
 - No code, solutions, or problem content tracked
 - 90-day data retention
 - Environment-aware (dev vs prod)
 
 **Key Metrics Tracked**:
+
 - Sync performance (duration, errors, backfill progress)
 - Extension sessions (active users, environment)
 - Feature usage (toast displays, fresh starts)
@@ -863,12 +887,14 @@ The extension uses PostHog for privacy-focused analytics to understand usage pat
 Provides user feedback for key events without interrupting workflow.
 
 **Implementation Details**:
+
 - **Location**: `src/ui/toast/toast.js` + `toast.css`
 - **Dependency-free**: Pure JavaScript, no UI frameworks
 - **Stacked display**: Multiple toasts shown simultaneously
 - **Auto-dismiss**: Configurable duration with progress bar
 
 **Toast Types**:
+
 1. **Welcome Toast** (15s)
    - Trigger: First-time user sign-in detected
    - Content: Personalized welcome with username
@@ -885,6 +911,7 @@ Provides user feedback for key events without interrupting workflow.
    - Purpose: Confirm sync worked, provide feedback link
 
 **Design Principles**:
+
 - Non-blocking (can be dismissed)
 - Consistent branding (logo on all toasts)
 - Accessible (ARIA labels, keyboard support)
@@ -896,43 +923,43 @@ Provides user feedback for key events without interrupting workflow.
 
 ### Architecture Decisions
 
-| Decision | Rationale | Trade-off |
-|----------|-----------|-----------|
-| **ES6 Modules** | Modern, tree-shakeable, IDE support | Required build step (Vite) |
-| **Vite Bundler** | Fast builds, great DX, HMR support | More complex than simple concat |
-| **Feature-based folders** | Clear organization, scales well | Deeper import paths |
-| **Singleton DB pattern** | Ensures single connection, prevents race conditions | Slightly more complex than global |
-| **Chrome storage + IndexedDB** | Best of both worlds (fast small data + large data storage) | Two storage APIs to manage |
+| Decision                       | Rationale                                                  | Trade-off                         |
+| ------------------------------ | ---------------------------------------------------------- | --------------------------------- |
+| **ES6 Modules**                | Modern, tree-shakeable, IDE support                        | Required build step (Vite)        |
+| **Vite Bundler**               | Fast builds, great DX, HMR support                         | More complex than simple concat   |
+| **Feature-based folders**      | Clear organization, scales well                            | Deeper import paths               |
+| **Singleton DB pattern**       | Ensures single connection, prevents race conditions        | Slightly more complex than global |
+| **Chrome storage + IndexedDB** | Best of both worlds (fast small data + large data storage) | Two storage APIs to manage        |
 
 ### Performance Decisions
 
-| Decision | Rationale | Trade-off |
-|----------|-----------|-----------|
-| **Diff-based snapshots** | 10-100x space savings vs full snapshots | Complexity in reconstruction |
-| **Incremental sync** | Only fetches new submissions (fast) | Must maintain manifest state |
-| **Threshold filtering** | Prevents snapshot spam from typos | Might miss some granular changes |
-| **Cross-tab locking** | Prevents duplicate API calls | Requires heartbeat mechanism |
-| **Template caching** | Avoids repeated API calls | Stale if LeetCode updates templates |
+| Decision                 | Rationale                               | Trade-off                           |
+| ------------------------ | --------------------------------------- | ----------------------------------- |
+| **Diff-based snapshots** | 10-100x space savings vs full snapshots | Complexity in reconstruction        |
+| **Incremental sync**     | Only fetches new submissions (fast)     | Must maintain manifest state        |
+| **Threshold filtering**  | Prevents snapshot spam from typos       | Might miss some granular changes    |
+| **Cross-tab locking**    | Prevents duplicate API calls            | Requires heartbeat mechanism        |
+| **Template caching**     | Avoids repeated API calls               | Stale if LeetCode updates templates |
 
 ### Reliability Decisions
 
-| Decision | Rationale | Trade-off |
-|----------|-----------|-----------|
-| **Retry with backoff** | Handles transient network failures | Slower on persistent failures |
-| **Checksum validation** | Ensures patches apply correctly | Extra computation |
-| **Heartbeat timeout** | Recovers from crashed tabs | 3-minute delay before recovery |
-| **DOM ready checks** | Prevents race conditions | Adds timing complexity |
-| **Multiple code sources** | Falls back if IndexedDB unavailable | More code paths to test |
+| Decision                  | Rationale                           | Trade-off                      |
+| ------------------------- | ----------------------------------- | ------------------------------ |
+| **Retry with backoff**    | Handles transient network failures  | Slower on persistent failures  |
+| **Checksum validation**   | Ensures patches apply correctly     | Extra computation              |
+| **Heartbeat timeout**     | Recovers from crashed tabs          | 3-minute delay before recovery |
+| **DOM ready checks**      | Prevents race conditions            | Adds timing complexity         |
+| **Multiple code sources** | Falls back if IndexedDB unavailable | More code paths to test        |
 
 ### User Experience Decisions
 
-| Decision | Rationale | Trade-off |
-|----------|-----------|-----------|
-| **Background operation** | Non-blocking, doesn't interrupt coding | User may not notice it working |
-| **Polling intervals** | Simple, works with LeetCode's SPA | Some CPU usage even when idle |
-| **Auto-sync on navigation** | Always up-to-date | More API calls |
-| **Visit-based solve windows** | Captures user intent to solve | Requires user to visit problem page |
-| **Fresh start detection** | Auto-resets for re-attempts | 98% threshold may have false positives |
+| Decision                      | Rationale                              | Trade-off                              |
+| ----------------------------- | -------------------------------------- | -------------------------------------- |
+| **Background operation**      | Non-blocking, doesn't interrupt coding | User may not notice it working         |
+| **Polling intervals**         | Simple, works with LeetCode's SPA      | Some CPU usage even when idle          |
+| **Auto-sync on navigation**   | Always up-to-date                      | More API calls                         |
+| **Visit-based solve windows** | Captures user intent to solve          | Requires user to visit problem page    |
+| **Fresh start detection**     | Auto-resets for re-attempts            | 98% threshold may have false positives |
 
 ---
 
@@ -962,24 +989,28 @@ Provides user feedback for key events without interrupting workflow.
 ## Interview Talking Points
 
 ### Technical Depth
+
 - **Module system**: ES6 imports, singleton pattern, dependency injection
 - **Storage strategy**: Why Chrome storage + IndexedDB hybrid
 - **Concurrency**: Cross-tab locking, heartbeat mechanism
 - **Data structures**: Diff-based snapshots, temporal linking
 
 ### Problem Solving
+
 - **Race conditions**: DOM ready, chrome.runtime init, cross-tab sync
 - **Network resilience**: Retry logic, exponential backoff, safe wrappers
 - **Space optimization**: Patches vs full snapshots (10-100x savings)
 - **Performance**: Threshold filtering, template caching, incremental sync
 
 ### User-Centric Design
+
 - **Non-blocking**: All operations async, doesn't interrupt user
 - **Reliable**: Checksums, validation, fallbacks
 - **Privacy-aware**: All data stored locally in browser
 - **Transparent**: Console logging for debugging
 
 ### Code Quality
+
 - **Modular**: Clear separation of concerns, single responsibility
 - **Documented**: Comments explain "why", not just "what"
 - **Consistent**: Naming conventions, error handling patterns
