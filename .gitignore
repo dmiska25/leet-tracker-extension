@@ -1,7 +1,6 @@
 .DS_Store
 build/**
 node_modules/
-package-lock.json
 
 # Test coverage
 coverage/

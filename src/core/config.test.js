@@ -178,9 +178,15 @@ describe("keys helpers", () => {
 });
 
 describe("util.sleep", () => {
-  it("resolves after specified time", async () => {
+  beforeEach(() => {
     vi.useFakeTimers();
+  });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("resolves after specified time", async () => {
     const promise = util.sleep(1000);
 
     vi.advanceTimersByTime(999);
@@ -188,12 +194,13 @@ describe("util.sleep", () => {
 
     vi.advanceTimersByTime(1);
     await promise;
-
-    vi.useRealTimers();
   });
 
   it("handles zero delay", async () => {
-    await expect(util.sleep(0)).resolves.toBeUndefined();
+    // Zero delay still uses setTimeout, need to run pending timers
+    const promise = util.sleep(0);
+    await vi.runAllTimersAsync();
+    await expect(promise).resolves.toBeUndefined();
   });
 });
 

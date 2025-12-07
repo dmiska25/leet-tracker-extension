@@ -1,8 +1,14 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   buildCodingJourneyFromSnapshots,
   buildRunEventsForSubmission,
 } from "./sync.js";
+import { getDBInstance } from "../core/db-instance.js";
+
+// Mock the DB instance
+vi.mock("../core/db-instance.js", () => ({
+  getDBInstance: vi.fn(),
+}));
 
 describe("buildCodingJourneyFromSnapshots", () => {
   it("returns null when no snapshots data", () => {
@@ -202,6 +208,49 @@ describe("buildRunEventsForSubmission", () => {
 
     const result = await buildRunEventsForSubmission(sub, "username", null);
     expect(result).toBeNull();
+  });
+
+  it("builds run summary when runs are found in window", async () => {
+    const sub = {
+      statusDisplay: "Accepted",
+      timestamp: 2, // Unix seconds (will be converted to 2000ms)
+      titleSlug: "two-sum",
+    };
+
+    const mockRuns = [
+      { startedAt: 1500, statusMsg: "Success", code: "test code 1" },
+      { startedAt: 1800, statusMsg: "Failure", code: "test code 2" },
+    ];
+
+    // Mock the DB instance to return run events
+    const mockDB = {
+      getRunEventsInWindow: vi.fn().mockResolvedValue(mockRuns),
+    };
+    vi.mocked(getDBInstance).mockResolvedValue(mockDB);
+
+    const result = await buildRunEventsForSubmission(
+      sub,
+      "username",
+      [1000, 1500]
+    );
+
+    expect(result).not.toBeNull();
+    expect(result.count).toBe(2);
+    expect(result.firstRun).toBe(1500); // startedAt of first run
+    expect(result.lastRun).toBe(1800); // startedAt of last run
+    expect(result.hasDetailedRuns).toBe(true);
+    expect(result.runs).toHaveLength(2);
+    expect(result._window).toEqual({
+      startMs: 1000,
+      endMs: 2000, // timestamp * 1000
+    });
+
+    expect(mockDB.getRunEventsInWindow).toHaveBeenCalledWith(
+      "username",
+      "two-sum",
+      1000,
+      2000
+    );
   });
 
   // Additional tests would require mocking getDBInstance() and getRunEventsInWindow()

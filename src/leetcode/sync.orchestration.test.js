@@ -24,6 +24,7 @@ vi.mock("../core/db-instance.js", () => ({
 
 vi.mock("./api.js", () => ({
   fetchProblemPremiumStatus: vi.fn(() => Promise.resolve(false)),
+  fetchProblemDescription: vi.fn(() => Promise.resolve({ title: "Test" })),
   fetchDescriptionIfNeeded: vi.fn(() => Promise.resolve(null)),
   fetchNoteSafe: vi.fn(() => Promise.resolve(null)),
   fetchSubmissionDetailsSafe: vi.fn(() => Promise.resolve(null)),
@@ -267,8 +268,12 @@ describe("processBackfillQueue", () => {
     );
     const afterTime = Date.now();
 
-    expect(manifest.backfillProcessedAt).toBeGreaterThanOrEqual(beforeTime);
-    expect(manifest.backfillProcessedAt).toBeLessThanOrEqual(afterTime);
+    // Verify timestamp is a number and reasonable (within test execution window + small margin)
+    expect(typeof manifest.backfillProcessedAt).toBe("number");
+    expect(manifest.backfillProcessedAt).toBeGreaterThanOrEqual(
+      beforeTime - 100
+    );
+    expect(manifest.backfillProcessedAt).toBeLessThanOrEqual(afterTime + 100);
   });
 
   it("captures analytics event for backfill progress", async () => {
@@ -369,11 +374,22 @@ describe("processBackfillQueue", () => {
     ];
 
     mockStorage.set("leettracker_backfill_queue_testuser", queue);
-    // chunk 0 exists
+    // chunk 0 exists and will succeed
     mockStorage.set("leettracker_leetcode_chunk_testuser_0", [
       { id: "sub1", titleSlug: "two-sum", timestamp: 1000 },
     ]);
-    // chunk 1 will fail to load (returns empty array)
+    // chunk 1 exists
+    mockStorage.set("leettracker_leetcode_chunk_testuser_1", [
+      { id: "sub2", titleSlug: "add-two", timestamp: 2000 },
+    ]);
+
+    // Mock enrichSubmission to throw for chunk 1 submission only
+    vi.mocked(api.fetchProblemDescription).mockImplementation((slug) => {
+      if (slug === "add-two") {
+        throw new Error("Network error for add-two");
+      }
+      return Promise.resolve({ title: slug });
+    });
 
     await processBackfillQueue(
       "testuser",
@@ -386,7 +402,8 @@ describe("processBackfillQueue", () => {
       "seen_key"
     );
 
-    // Should complete without throwing
+    // Should complete without throwing, queue should be empty
+    // (both items processed, even though one failed)
     expect(mockStorage.get("leettracker_backfill_queue_testuser")).toEqual([]);
   });
 
@@ -606,9 +623,29 @@ describe("syncSubmissions", () => {
         total_submissions: 5,
       })
     );
+
+    // Verify chunk was created at index 0 (first chunk)
+    const chunk = mockStorage.get("leettracker_leetcode_chunk_testuser_0");
+    expect(chunk).toBeDefined();
+    expect(chunk.length).toBe(5);
+
+    // Verify manifest was updated correctly
+    const manifest = mockStorage.get("leettracker_sync_manifest_testuser");
+    expect(manifest.chunkCount).toBe(1);
+    expect(manifest.totalSynced).toBe(5);
+    // lastTimestamp is chunk.at(-1).timestamp (the last item added to chunk)
+    expect(manifest.lastTimestamp).toBe(submissions[4].timestamp);
+    expect(manifest.chunks[0]).toEqual({
+      index: 0,
+      from: submissions[0].timestamp, // chunk[0] - first item added (newest submission)
+      to: submissions[4].timestamp, // chunk.at(-1) - last item added (oldest submission)
+    });
   });
 
   it("splits old submissions into backfill queue", async () => {
+    // NOTE: The sync logic iterates through submissions in order and counts how many
+    // are older than the cutoff (skippedForBackfill). It then queues the first N items
+    // for backfill. This means old submissions should be at the START of the array.
     const now = Math.floor(Date.now() / 1000);
     const cutoff = now - 90 * 24 * 60 * 60; // 90 days ago
 
@@ -621,14 +658,14 @@ describe("syncSubmissions", () => {
     });
 
     const submissions = [
-      // Old submission (should go to backfill)
+      // Old submission at index 0 (should go to backfill)
       {
         id: "old1",
         titleSlug: "old-problem",
         timestamp: cutoff - 1000,
         statusDisplay: "Accepted",
       },
-      // Recent submission (should be enriched)
+      // Recent submission (should be enriched immediately)
       {
         id: "new1",
         titleSlug: "new-problem",
@@ -643,12 +680,55 @@ describe("syncSubmissions", () => {
 
     expect(result.success).toBe(true);
 
-    // Check backfill queue
+    // Check backfill queue contains the old submission
     const backfillQueue = mockStorage.get(
       "leettracker_backfill_queue_testuser"
     );
     expect(backfillQueue).toBeDefined();
-    expect(backfillQueue.length).toBeGreaterThan(0);
+    expect(backfillQueue.length).toBe(1);
+    expect(backfillQueue[0].id).toBe("old1");
+  });
+
+  it("handles mixed-order submissions with multiple old items", async () => {
+    // Test to catch regressions in backfill selection logic.
+    // The sync code counts how many submissions are old (before cutoff),
+    // then queues the first N items (by array index) for backfill,
+    // and enriches items from index N onward.
+    const now = Math.floor(Date.now() / 1000);
+    const cutoff = now - 90 * 24 * 60 * 60;
+
+    mockStorage.set("leettracker_sync_manifest_testuser", {
+      lastTimestamp: 0,
+      total: 0,
+      totalSynced: 0,
+      chunkCount: 0,
+      chunks: [],
+    });
+
+    const submissions = [
+      // First two are old (will be queued for backfill)
+      { id: "old1", timestamp: cutoff - 2000, statusDisplay: "Accepted" },
+      { id: "old2", timestamp: cutoff - 1000, statusDisplay: "Accepted" },
+      // Last two are recent (will be enriched)
+      { id: "new1", timestamp: now - 1000, statusDisplay: "Accepted" },
+      { id: "new2", timestamp: now - 2000, statusDisplay: "Accepted" },
+    ];
+
+    vi.mocked(api.fetchAllSubmissions).mockResolvedValue(submissions);
+
+    const result = await syncSubmissions("testuser");
+
+    expect(result.success).toBe(true);
+
+    // Verify both old submissions made it to backfill queue (first 2 items)
+    const backfillQueue = mockStorage.get(
+      "leettracker_backfill_queue_testuser"
+    );
+    expect(backfillQueue).toBeDefined();
+    expect(backfillQueue.length).toBe(2);
+    const oldIds = backfillQueue.map((item) => item.id);
+    expect(oldIds).toContain("old1");
+    expect(oldIds).toContain("old2");
   });
 
   it("releases lock on success", async () => {

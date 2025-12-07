@@ -156,7 +156,7 @@ describe("deriveSolveWindow", () => {
     expect(result.solveTimeSec).toBeNull();
   });
 
-  it("handles zero solve time", () => {
+  it("handles 1-second solve time", () => {
     const sub = {
       titleSlug: "two-sum",
       timestamp: 1000,

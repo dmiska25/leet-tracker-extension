@@ -16,19 +16,9 @@ export default defineConfig({
       },
     },
   },
-  // Exclude test files from builds
-  resolve: {
-    alias: {
-      // Prevent test files from being bundled
-    },
-  },
   // Ensure consistent output structure
   server: {
     port: 5173,
     strictPort: true,
-  },
-  // Exclude test files and test setup
-  optimizeDeps: {
-    exclude: ['**/*.test.js', '**/*.spec.js', 'tests/**'],
   },
 });

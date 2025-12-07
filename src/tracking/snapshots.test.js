@@ -206,7 +206,7 @@ describe("calculateCodeSimilarity", () => {
     expect(calculateCodeSimilarity(code, code)).toBe(1.0);
   });
 
-  it("returns 0.0 for completely different code", () => {
+  it("returns low similarity for different code", () => {
     const code1 = "def solution(): return 1";
     const code2 = "class Tree: pass";
     const similarity = calculateCodeSimilarity(code1, code2);
