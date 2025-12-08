@@ -256,6 +256,12 @@ export async function fetchAllSubmissions(lastTimestamp) {
       console.warn(
         `[LeetTracker] Could not verify submission ${mostRecent.id}, proceeding anyway`
       );
+    } else if (verification.statusMsg) {
+      // Update the statusDisplay with the verified status from the check endpoint
+      console.log(
+        `[LeetTracker] Updating submission ${mostRecent.id} status from "${mostRecent.statusDisplay}" to "${verification.statusMsg}"`
+      );
+      mostRecent.statusDisplay = verification.statusMsg;
     }
   }
 
