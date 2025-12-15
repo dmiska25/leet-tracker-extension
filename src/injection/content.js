@@ -37,7 +37,8 @@ function showToastAfterSync(result, username) {
   const solvesCount = result.newSolves;
 
   // LeetTracker URL (global for now until routing is set up)
-  const leetTrackerUrl = "https://leet-tracker-log.vercel.app/";
+  const leetTrackerUrl =
+    "https://leet-tracker-log.vercel.app/?utm_source=extension&utm_medium=extension&utm_campaign=extension";
 
   // Show the toast
   if (
