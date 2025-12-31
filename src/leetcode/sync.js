@@ -7,6 +7,7 @@ import {
   fetchDescriptionIfNeeded,
   fetchNoteSafe,
   fetchSubmissionDetailsSafe,
+  fetchUserSubmissionTotal,
 } from "./api.js";
 import {
   acquireSyncLock,
@@ -26,7 +27,11 @@ const {
   recentJourneys: getRecentJourneysKey,
   recentRuns: getRecentRunsKey,
 } = keys;
-const { get: getFromStorage, set: saveToStorage } = store;
+const {
+  get: getFromStorage,
+  set: saveToStorage,
+  remove: removeFromStorage,
+} = store;
 
 // --------------- derive solve window from visit log ---------------
 export function deriveSolveWindow(sub, visitLog) {
@@ -494,6 +499,24 @@ export async function buildHintSummaryForSubmission(
   }
 }
 
+// --------------- sync data reset helpers ---------------
+async function resetUserSyncData(username, manifest, backfillQueueKey) {
+  const keysToRemove = [
+    getManifestKey(username),
+    getSeenProblemsKey(username),
+    backfillQueueKey,
+  ];
+
+  const chunkCount = manifest?.chunkCount ?? 0;
+  for (let i = 0; i < chunkCount; i++) {
+    keysToRemove.push(getChunkKey(username, i));
+  }
+
+  for (const key of keysToRemove) {
+    await removeFromStorage(key);
+  }
+}
+
 // --------------- backfill queue ---------------
 export async function processBackfillQueue(
   username,
@@ -631,9 +654,51 @@ export async function syncSubmissions(username) {
     lastT = manifest.lastTimestamp || 0;
     prevTotalSubs = manifest.total || 0;
     isFirstSync = lastT === 0;
+    const remoteTotalPromise = userInfo.username
+      ? fetchUserSubmissionTotal(userInfo.username).catch((err) => {
+          console.warn(
+            "[LeetTracker] Failed to fetch remote submission total:",
+            err
+          );
+          return null;
+        })
+      : Promise.resolve(null);
 
-    const subs = await fetchAllSubmissions(lastT);
-    const newTotalSubs = prevTotalSubs + subs.length;
+    let subs = await fetchAllSubmissions(lastT);
+    const remoteTotal = await remoteTotalPromise;
+
+    let newTotalSubs = prevTotalSubs + subs.length;
+
+    if (remoteTotal !== null && newTotalSubs > remoteTotal) {
+      analytics.capture("sync_data_reset_due_to_mismatch", {
+        username,
+        sync_start_timestamp: syncStartTime,
+        stored_total: prevTotalSubs,
+        remote_total: remoteTotal,
+        calculated_total: newTotalSubs,
+        stored_last_timestamp: lastT,
+      });
+      console.warn(
+        `[LeetTracker] Detected submission total mismatch (stored: ${prevTotalSubs}, remote: ${remoteTotal}, calculated: ${newTotalSubs}) - resetting sync data and aborting sync`
+      );
+
+      await resetUserSyncData(username, manifest, backfillQueueKey);
+
+      return { success: false, error: "reset_due_to_mismatch" };
+    } else if (remoteTotal !== null && newTotalSubs < remoteTotal) {
+      analytics.capture("sync_partial_data_loss_detected", {
+        username,
+        sync_start_timestamp: syncStartTime,
+        stored_total: prevTotalSubs,
+        remote_total: remoteTotal,
+        calculated_total: newTotalSubs,
+        stored_last_timestamp: lastT,
+      });
+      console.warn(
+        `[LeetTracker] Detected possible data loss (stored: ${prevTotalSubs}, remote: ${remoteTotal}, calculated: ${newTotalSubs}) - continuing sync`
+      );
+    }
+
     let totalSynced = manifest.totalSynced || prevTotalSubs;
     let skippedForBackfill = 0;
 

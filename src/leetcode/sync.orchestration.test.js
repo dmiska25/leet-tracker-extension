@@ -24,6 +24,7 @@ vi.mock("./api.js", () => ({
   fetchNoteSafe: vi.fn(() => Promise.resolve(null)),
   fetchSubmissionDetailsSafe: vi.fn(() => Promise.resolve(null)),
   fetchAllSubmissions: vi.fn(() => Promise.resolve([])),
+  fetchUserSubmissionTotal: vi.fn(() => Promise.resolve(null)),
   getUserInfoWithCache: vi.fn(() => Promise.resolve({ isPremium: false })),
 }));
 
@@ -65,6 +66,16 @@ describe("processBackfillQueue", () => {
         mockStorage.set(key, value);
       });
       if (callback) callback();
+    });
+
+    global.chrome.storage.local.remove.mockImplementation((keys, callback) => {
+      const list = Array.isArray(keys) ? keys : [keys];
+      list.forEach((k) => {
+        const key = typeof k === "string" ? k : String(k);
+        mockStorage.delete(key);
+      });
+      if (callback) callback();
+      return Promise.resolve();
     });
   });
 
@@ -566,6 +577,11 @@ describe("syncSubmissions", () => {
       total: 50,
     });
     vi.mocked(api.fetchAllSubmissions).mockResolvedValue([]);
+    vi.mocked(api.fetchUserSubmissionTotal).mockResolvedValue(1000);
+    vi.mocked(api.getUserInfoWithCache).mockResolvedValue({
+      isPremium: false,
+      username: "testuser",
+    });
 
     const result = await syncSubmissions("testuser");
 
@@ -792,6 +808,58 @@ describe("syncSubmissions", () => {
       expect.any(Error),
       expect.objectContaining({
         username: "testuser",
+      })
+    );
+  });
+
+  it("resets manifest when stored total exceeds LeetCode total", async () => {
+    mockStorage.set("leettracker_sync_manifest_testuser", {
+      lastTimestamp: 999999999,
+      total: 1200,
+      chunkCount: 2,
+      chunks: [{ index: 0 }, { index: 1 }],
+      totalSynced: 1200,
+    });
+    mockStorage.set("leettracker_leetcode_chunk_testuser_0", [{ id: "a" }]);
+    mockStorage.set("leettracker_leetcode_chunk_testuser_1", [{ id: "b" }]);
+    mockStorage.set("leettracker_backfill_queue_testuser", [{ id: "c" }]);
+
+    vi.mocked(api.fetchUserSubmissionTotal).mockResolvedValue(900);
+    vi.mocked(api.getUserInfoWithCache).mockResolvedValue({
+      isPremium: false,
+      username: "testuser",
+    });
+    vi.mocked(api.fetchAllSubmissions).mockResolvedValue([]);
+
+    const result = await syncSubmissions("testuser");
+
+    expect(result).toEqual({ success: false, error: "reset_due_to_mismatch" });
+
+    // Chunks/backfill should be cleared (all keys removed individually)
+    const removedKeys = global.chrome.storage.local.remove.mock.calls
+      .map((call) => (Array.isArray(call[0]) ? call[0] : [call[0]]))
+      .flat();
+
+    expect(removedKeys).toEqual(
+      expect.arrayContaining([
+        "leettracker_sync_manifest_testuser",
+        "leettracker_seen_problems_testuser",
+        "leettracker_backfill_queue_testuser",
+        "leettracker_leetcode_chunk_testuser_0",
+        "leettracker_leetcode_chunk_testuser_1",
+      ])
+    );
+
+    // Sync should have aborted after first fetch
+    expect(api.fetchAllSubmissions).toHaveBeenCalledTimes(1);
+    expect(api.fetchAllSubmissions).toHaveBeenCalledWith(999999999);
+
+    expect(mockAnalytics.capture).toHaveBeenCalledWith(
+      "sync_data_reset_due_to_mismatch",
+      expect.objectContaining({
+        username: "testuser",
+        stored_total: 1200,
+        remote_total: 900,
       })
     );
   });
