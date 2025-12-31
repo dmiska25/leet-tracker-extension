@@ -22,18 +22,6 @@
     if (type === "request_chunk_manifest_since") {
       const since = event.data.since || 0;
 
-      if (analytics) {
-        analytics.capture(
-          "webapp_data_requested",
-          {
-            username,
-            request_type: "chunk_manifest",
-            since_timestamp: since,
-          },
-          { throttle: true }
-        );
-      }
-
       try {
         const manifestKey = `leettracker_sync_manifest_${username}`;
         const result = await chrome.storage.local.get([manifestKey]);
@@ -64,7 +52,11 @@
               username,
               request_type: "chunk_manifest",
               chunks_sent: filtered.length,
-              total_submissions: result[manifestKey]?.total,
+              total_submissions: result[manifestKey]?.total ?? null,
+              total_submissions_synced:
+                result[manifestKey]?.totalSynced ?? null,
+              skippedForBackfill:
+                result[manifestKey]?.skippedForBackfill ?? null,
             },
             { throttle: true }
           );
@@ -83,18 +75,6 @@
     if (type === "request_chunk_by_index") {
       const index = event.data.index;
       if (typeof index !== "number") return;
-
-      if (analytics) {
-        analytics.capture(
-          "webapp_data_requested",
-          {
-            username,
-            request_type: "chunk_by_index",
-            chunk_index: index,
-          },
-          { throttle: true }
-        );
-      }
 
       try {
         const chunkKey = `leettracker_leetcode_chunk_${username}_${index}`;
