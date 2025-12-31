@@ -525,13 +525,6 @@ describe("syncSubmissions", () => {
     const result = await syncSubmissions("testuser");
 
     expect(result).toEqual({ success: false, error: "lock_held" });
-    expect(mockAnalytics.capture).toHaveBeenCalledWith(
-      "sync_skipped",
-      expect.objectContaining({
-        username: "testuser",
-        reason: "lock_held_by_other_tab",
-      })
-    );
     expect(locks.releaseSyncLock).not.toHaveBeenCalled();
   });
 

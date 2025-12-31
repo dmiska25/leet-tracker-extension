@@ -600,10 +600,6 @@ export async function syncSubmissions(username) {
 
   if (!(await acquireSyncLock())) {
     console.log(`[LeetTracker] Could not acquire sync lock, skipping sync`);
-    analytics.capture("sync_skipped", {
-      username,
-      reason: "lock_held_by_other_tab",
-    });
     return { success: false, error: "lock_held" };
   }
 
@@ -679,6 +675,7 @@ export async function syncSubmissions(username) {
         "sync_no_new_submissions",
         {
           username,
+          sync_start_timestamp: syncStartTime,
           total_submissions: prevTotalSubs,
           last_sync_timestamp: lastT,
         },
@@ -698,6 +695,16 @@ export async function syncSubmissions(username) {
       return { success: true, newSolves: 0, isBackfill: false };
     }
 
+    analytics.capture("starting_sync_with_new_submissions", {
+      username,
+      sync_start_timestamp: syncStartTime,
+      new_submissions: subs.length,
+      total_submissions: newTotalSubs,
+      last_sync_timestamp: lastT,
+      total_synced: totalSynced,
+      skipped_for_backfill: skippedForBackfill,
+    });
+
     let chunkIdx = Math.max(0, (manifest.chunkCount ?? 0) - 1);
     let chunk = await getFromStorage(getChunkKey(username, chunkIdx), []);
     const meta = manifest.chunks || [];
@@ -715,6 +722,15 @@ export async function syncSubmissions(username) {
         totalSynced,
         skippedForBackfill
       );
+      analytics.capture("chunk_flushed", {
+        username,
+        sync_start_timestamp: syncStartTime,
+        chunk_index: chunkIdx,
+        submissions_in_chunk: chunk.length,
+        total_submissions: newTotalSubs,
+        total_synced: totalSynced,
+        skipped_for_backfill: skippedForBackfill,
+      });
     };
 
     for (const sub of subs) {
@@ -850,8 +866,8 @@ export async function syncSubmissions(username) {
     // Track successful sync completion
     analytics.capture("sync_completed", {
       username,
-      duration_ms: syncDuration,
       sync_start_timestamp: syncStartTime,
+      duration_ms: syncDuration,
       new_submissions: subs.length,
       total_submissions: newTotalSubs,
       enriched_count: enrichedCount,
@@ -875,8 +891,8 @@ export async function syncSubmissions(username) {
     // Track sync failure
     analytics.captureError("sync_failed", e, {
       username,
-      duration_ms: Date.now() - syncStartTime,
       sync_start_timestamp: syncStartTime,
+      duration_ms: Date.now() - syncStartTime,
       error_stage: "sync_process",
       last_sync_timestamp: lastT,
       previous_total: prevTotalSubs,

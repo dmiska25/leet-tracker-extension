@@ -1,5 +1,6 @@
 // src/core/locks.js
 import { consts, store, util } from "./config.js";
+import { getAnalytics } from "./analytics.js";
 
 const { SYNC_LOCK_KEY, HEARTBEAT_TIMEOUT_MS } = consts;
 
@@ -62,6 +63,13 @@ export function checkLockAvailability(lock, context = "") {
     )}s)${context}`,
     { timeSinceHeartbeat, sessionId: lock.sessionId }
   );
+
+  getAnalytics().capture("sync_lock_expired", {
+    timeSinceHeartbeat,
+    lockSessionId: lock.sessionId,
+    context: context.trim() || "initial_check",
+  });
+
   return { canAcquire: true, reason: "heartbeat_expired" };
 }
 
