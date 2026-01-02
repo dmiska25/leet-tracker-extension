@@ -328,63 +328,6 @@ export async function fetchProblemPremiumStatus(titleSlug) {
 }
 
 /**
- * Fetch total submission count for a user (aggregated, all difficulties).
- * Returns null on failure.
- */
-export async function fetchUserSubmissionTotal(username) {
-  if (!username) return null;
-
-  const body = {
-    query: `
-        query userSessionProgress($username: String!) {
-          matchedUser(username: $username) {
-            submitStats {
-              totalSubmissionNum {
-                difficulty
-                count
-                submissions
-              }
-            }
-          }
-        }
-      `,
-    variables: { username },
-    operationName: "userSessionProgress",
-  };
-
-  const fetchFn = async () => {
-    const res = await fetch(GRAPHQL_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Referer: "https://leetcode.com/problemset/all/",
-      },
-      body: JSON.stringify(body),
-      credentials: "include",
-    });
-
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
-    }
-
-    const json = await res.json();
-    return json.data?.matchedUser?.submitStats?.totalSubmissionNum || null;
-  };
-
-  const validator = (result) => {
-    if (!Array.isArray(result)) return false;
-    const allEntry = result.find((r) => r.difficulty === "All");
-    return Boolean(allEntry && Number.isFinite(allEntry.submissions));
-  };
-
-  const result = await retryWithBackoff(fetchFn, validator);
-  if (!result) return null;
-
-  const allEntry = result.find((r) => r.difficulty === "All");
-  return allEntry?.submissions ?? null;
-}
-
-/**
  * Fetch problem description (HTML content + questionId).
  * @param {string} titleSlug
  * @returns {Promise<{questionId:string, content:string}|null>}
