@@ -701,6 +701,7 @@ export async function syncSubmissions(username) {
   const ENRICHMENT_CUTOFF_DAYS = 90;
   const ENRICHMENT_CUTOFF_TIMESTAMP =
     Math.floor(Date.now() / 1000) - ENRICHMENT_CUTOFF_DAYS * 24 * 60 * 60;
+  const MAX_PROCESSED_SUBMISSIONS = 100;
   try {
     const manifestKey = getManifestKey(username);
     const seenKey = getSeenProblemsKey(username);
@@ -839,9 +840,14 @@ export async function syncSubmissions(username) {
       });
     };
 
-    for (const sub of subs) {
-      if (sub.timestamp < ENRICHMENT_CUTOFF_TIMESTAMP) {
+    if (subs.length > MAX_PROCESSED_SUBMISSIONS) {
+      skippedForBackfill = subs.length - MAX_PROCESSED_SUBMISSIONS;
+    }
+    for (let i = skippedForBackfill; i < subs.length; i++) {
+      if (subs[i].timestamp < ENRICHMENT_CUTOFF_TIMESTAMP) {
         skippedForBackfill++;
+      } else {
+        break;
       }
     }
     const enrichedCount = subs.length - skippedForBackfill;
