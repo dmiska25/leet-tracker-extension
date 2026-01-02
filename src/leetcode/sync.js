@@ -816,7 +816,39 @@ export async function syncSubmissions(username) {
     let chunk = await getFromStorage(getChunkKey(username, chunkIdx), []);
     const meta = manifest.chunks || [];
 
+    // Emit what we see on load so we can detect pre-existing divergence between manifest and chunks.
+    analytics.capture("chunk_loaded_for_sync", {
+      username,
+      sync_start_timestamp: syncStartTime,
+      chunk_index: chunkIdx,
+      manifest_chunk_count: manifest.chunkCount ?? 0,
+      chunk_length: Array.isArray(chunk) ? chunk.length : 0,
+      manifest_total: manifest.total ?? null,
+      manifest_total_synced: manifest.totalSynced ?? null,
+      total_synced: totalSynced,
+      total_submissions: newTotalSubs,
+      previous_total: prevTotalSubs,
+      last_sync_timestamp: lastT,
+      skipped_for_backfill: skippedForBackfill,
+    });
+
     const executeFlushChunk = async () => {
+      const chunkKey = getChunkKey(username, chunkIdx);
+
+      // Read the currently persisted chunk before we overwrite it.
+      let persistedLengthBefore = null;
+      try {
+        const persistedBefore = (await getFromStorage(chunkKey, [])) || [];
+        persistedLengthBefore = Array.isArray(persistedBefore)
+          ? persistedBefore.length
+          : null;
+      } catch (err) {
+        console.warn(
+          `[LeetTracker] Failed to read chunk before flush (chunk ${chunkIdx}):`,
+          err
+        );
+      }
+
       await flushChunk(
         username,
         chunkIdx,
@@ -829,6 +861,21 @@ export async function syncSubmissions(username) {
         totalSynced,
         skippedForBackfill
       );
+
+      // Read back after flush to verify persistence length.
+      let persistedLengthAfter = null;
+      try {
+        const persistedAfter = (await getFromStorage(chunkKey, [])) || [];
+        persistedLengthAfter = Array.isArray(persistedAfter)
+          ? persistedAfter.length
+          : null;
+      } catch (err) {
+        console.warn(
+          `[LeetTracker] Failed to read chunk after flush (chunk ${chunkIdx}):`,
+          err
+        );
+      }
+
       analytics.capture("chunk_flushed", {
         username,
         sync_start_timestamp: syncStartTime,
@@ -837,6 +884,9 @@ export async function syncSubmissions(username) {
         total_submissions: newTotalSubs,
         total_synced: totalSynced,
         skipped_for_backfill: skippedForBackfill,
+        in_memory_chunk_length: chunk.length,
+        persisted_chunk_length_before: persistedLengthBefore,
+        persisted_chunk_length_after: persistedLengthAfter,
       });
     };
 
