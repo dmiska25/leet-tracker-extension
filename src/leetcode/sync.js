@@ -7,7 +7,6 @@ import {
   fetchDescriptionIfNeeded,
   fetchNoteSafe,
   fetchSubmissionDetailsSafe,
-  fetchUserSubmissionTotal,
 } from "./api.js";
 import {
   acquireSyncLock,
@@ -517,6 +516,71 @@ async function resetUserSyncData(username, manifest, backfillQueueKey) {
   }
 }
 
+// --------------- sync storage audit (runs once per session) ---------------
+let hasAuditedStoredData = false;
+
+export async function __resetAuditFlagForTests() {
+  hasAuditedStoredData = false;
+}
+
+async function auditStoredSyncData(username, manifest) {
+  if (!manifest || !manifest.chunkCount) {
+    return { ok: true };
+  }
+
+  const issues = [];
+  const seenIds = new Set();
+  let duplicateCount = 0;
+  let totalFromChunks = 0;
+
+  for (let i = 0; i < manifest.chunkCount; i++) {
+    const chunk = (await getFromStorage(getChunkKey(username, i), [])) || [];
+    const expectedFullChunk = i < manifest.chunkCount - 1;
+
+    if (expectedFullChunk && chunk.length !== 100) {
+      issues.push({ type: "chunk_size", index: i, length: chunk.length });
+    }
+    if (!expectedFullChunk && chunk.length > 100) {
+      issues.push({ type: "chunk_size", index: i, length: chunk.length });
+    }
+
+    totalFromChunks += chunk.length;
+
+    for (const sub of chunk) {
+      const subId = sub?.id;
+      if (!subId) continue;
+      if (seenIds.has(subId)) {
+        duplicateCount++;
+      } else {
+        seenIds.add(subId);
+      }
+    }
+  }
+
+  if (duplicateCount > 0) {
+    issues.push({ type: "duplicates", count: duplicateCount });
+  }
+
+  if (
+    manifest.total !== undefined &&
+    manifest.total !== null &&
+    totalFromChunks !== manifest.total
+  ) {
+    issues.push({
+      type: "total_mismatch",
+      stored_total: manifest.total,
+      counted_total: totalFromChunks,
+    });
+  }
+
+  return {
+    ok: issues.length === 0,
+    issues,
+    totalFromChunks,
+    duplicateCount,
+  };
+}
+
 // --------------- backfill queue ---------------
 export async function processBackfillQueue(
   username,
@@ -637,6 +701,7 @@ export async function syncSubmissions(username) {
   const ENRICHMENT_CUTOFF_DAYS = 90;
   const ENRICHMENT_CUTOFF_TIMESTAMP =
     Math.floor(Date.now() / 1000) - ENRICHMENT_CUTOFF_DAYS * 24 * 60 * 60;
+  const MAX_PROCESSED_SUBMISSIONS = 100;
   try {
     const manifestKey = getManifestKey(username);
     const seenKey = getSeenProblemsKey(username);
@@ -654,50 +719,27 @@ export async function syncSubmissions(username) {
     lastT = manifest.lastTimestamp || 0;
     prevTotalSubs = manifest.total || 0;
     isFirstSync = lastT === 0;
-    const remoteTotalPromise = userInfo.username
-      ? fetchUserSubmissionTotal(userInfo.username).catch((err) => {
-          console.warn(
-            "[LeetTracker] Failed to fetch remote submission total:",
-            err
-          );
-          return null;
-        })
-      : Promise.resolve(null);
+    if (!hasAuditedStoredData) {
+      hasAuditedStoredData = true;
+      const audit = await auditStoredSyncData(username, manifest);
+      if (!audit.ok) {
+        analytics.capture("sync_data_reset_due_to_audit", {
+          username,
+          sync_start_timestamp: syncStartTime,
+          issues: audit.issues,
+        });
+        console.warn(
+          `[LeetTracker] Audit detected inconsistent stored submissions, resetting sync data`
+        );
 
-    let subs = await fetchAllSubmissions(lastT);
-    const remoteTotal = await remoteTotalPromise;
+        await resetUserSyncData(username, manifest, backfillQueueKey);
 
-    let newTotalSubs = prevTotalSubs + subs.length;
-
-    if (remoteTotal !== null && newTotalSubs > remoteTotal) {
-      analytics.capture("sync_data_reset_due_to_mismatch", {
-        username,
-        sync_start_timestamp: syncStartTime,
-        stored_total: prevTotalSubs,
-        remote_total: remoteTotal,
-        calculated_total: newTotalSubs,
-        stored_last_timestamp: lastT,
-      });
-      console.warn(
-        `[LeetTracker] Detected submission total mismatch (stored: ${prevTotalSubs}, remote: ${remoteTotal}, calculated: ${newTotalSubs}) - resetting sync data and aborting sync`
-      );
-
-      await resetUserSyncData(username, manifest, backfillQueueKey);
-
-      return { success: false, error: "reset_due_to_mismatch" };
-    } else if (remoteTotal !== null && newTotalSubs < remoteTotal) {
-      analytics.capture("sync_partial_data_loss_detected", {
-        username,
-        sync_start_timestamp: syncStartTime,
-        stored_total: prevTotalSubs,
-        remote_total: remoteTotal,
-        calculated_total: newTotalSubs,
-        stored_last_timestamp: lastT,
-      });
-      console.warn(
-        `[LeetTracker] Detected possible data loss (stored: ${prevTotalSubs}, remote: ${remoteTotal}, calculated: ${newTotalSubs}) - continuing sync`
-      );
+        return { success: false, error: "reset_due_to_audit" };
+      }
     }
+
+    const subs = await fetchAllSubmissions(lastT);
+    const newTotalSubs = prevTotalSubs + subs.length;
 
     let totalSynced = manifest.totalSynced || prevTotalSubs;
     let skippedForBackfill = 0;
@@ -798,9 +840,14 @@ export async function syncSubmissions(username) {
       });
     };
 
-    for (const sub of subs) {
-      if (sub.timestamp < ENRICHMENT_CUTOFF_TIMESTAMP) {
+    if (subs.length > MAX_PROCESSED_SUBMISSIONS) {
+      skippedForBackfill = subs.length - MAX_PROCESSED_SUBMISSIONS;
+    }
+    for (let i = skippedForBackfill; i < subs.length; i++) {
+      if (subs[i].timestamp < ENRICHMENT_CUTOFF_TIMESTAMP) {
         skippedForBackfill++;
+      } else {
+        break;
       }
     }
     const enrichedCount = subs.length - skippedForBackfill;
