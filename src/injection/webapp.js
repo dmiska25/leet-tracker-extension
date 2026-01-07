@@ -19,11 +19,15 @@
     const { source, type, username } = event.data || {};
     if (source !== WEBAPP_SOURCE || !username) return;
 
+    const normalizedUsername =
+      typeof username === "string" ? username.toLowerCase() : "";
+    if (!normalizedUsername) return;
+
     if (type === "request_chunk_manifest_since") {
       const since = event.data.since || 0;
 
       try {
-        const manifestKey = `leettracker_sync_manifest_${username}`;
+        const manifestKey = `leettracker_sync_manifest_${normalizedUsername}`;
         const result = await chrome.storage.local.get([manifestKey]);
         const manifestChunks = result[manifestKey]?.chunks || [];
 
@@ -33,7 +37,7 @@
           {
             source: EXTENSION_SOURCE,
             type: "response_chunk_manifest",
-            username,
+            username: normalizedUsername,
             chunks: filtered,
             total: result[manifestKey]?.total ?? null,
             totalSynced: result[manifestKey]?.totalSynced ?? null,
@@ -42,14 +46,14 @@
           "*"
         );
         console.log(
-          `[LeetTracker][Webapp] Manifest for ${username} since ${since} sent`
+          `[LeetTracker][Webapp] Manifest for ${normalizedUsername} since ${since} sent`
         );
 
         if (analytics) {
           analytics.capture(
             "webapp_data_sent",
             {
-              username,
+              username: normalizedUsername,
               request_type: "chunk_manifest",
               chunks_sent: filtered.length,
               total_submissions: result[manifestKey]?.total ?? null,
@@ -65,7 +69,7 @@
         console.error("[LeetTracker][Webapp] Failed to get manifest:", e);
         if (analytics) {
           analytics.captureError("webapp_bridge_error", e, {
-            username,
+            username: normalizedUsername,
             request_type: "chunk_manifest",
           });
         }
@@ -77,19 +81,19 @@
       if (typeof index !== "number") return;
 
       try {
-        const chunkKey = `leettracker_leetcode_chunk_${username}_${index}`;
+        const chunkKey = `leettracker_leetcode_chunk_${normalizedUsername}_${index}`;
         const result = await chrome.storage.local.get([chunkKey]);
         const baseData = result[chunkKey] || [];
 
         // Enhance with recent code journeys
-        const recentJourneysKey = `leettracker_recent_journeys_${username}`;
+        const recentJourneysKey = `leettracker_recent_journeys_${normalizedUsername}`;
         const recentJourneysResult = await chrome.storage.local.get([
           recentJourneysKey,
         ]);
         const recentJourneys = recentJourneysResult[recentJourneysKey] || [];
 
         // Enhance with recent run groupings
-        const recentRunsKey = `leettracker_recent_runs_${username}`;
+        const recentRunsKey = `leettracker_recent_runs_${normalizedUsername}`;
         const recentRunsResult = await chrome.storage.local.get([
           recentRunsKey,
         ]);
@@ -123,21 +127,21 @@
           {
             source: EXTENSION_SOURCE,
             type: "response_chunk",
-            username,
+            username: normalizedUsername,
             index,
             data: enhancedData,
           },
           "*"
         );
         console.log(
-          `[LeetTracker][Webapp] Enhanced chunk ${index} for ${username} sent (${enhancedData.length} submissions, ${recentJourneys.length} recent journeys, ${recentRunGroups.length} recent run groups)`
+          `[LeetTracker][Webapp] Enhanced chunk ${index} for ${normalizedUsername} sent (${enhancedData.length} submissions, ${recentJourneys.length} recent journeys, ${recentRunGroups.length} recent run groups)`
         );
 
         if (analytics) {
           analytics.capture(
             "webapp_data_sent",
             {
-              username,
+              username: normalizedUsername,
               request_type: "chunk_by_index",
               chunk_index: index,
               submission_count: enhancedData.length,
@@ -151,12 +155,12 @@
         }
       } catch (e) {
         console.error(
-          `[LeetTracker][Webapp] Failed to get chunk ${index} for ${username}:`,
+          `[LeetTracker][Webapp] Failed to get chunk ${index} for ${normalizedUsername}:`,
           e
         );
         if (analytics) {
           analytics.captureError("webapp_bridge_error", e, {
-            username,
+            username: normalizedUsername,
             request_type: "chunk_by_index",
             chunk_index: index,
           });

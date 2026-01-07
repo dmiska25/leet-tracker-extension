@@ -556,9 +556,11 @@ export function getUserInfoWithCache(maxAttempts = 4) {
           userStatus.username &&
           userStatus.activeSessionId
         ) {
+          const normalizedUsername = userStatus.username.toLowerCase();
+
           cachedUserInfo = {
             userId: userStatus.activeSessionId.toString(),
-            username: userStatus.username,
+            username: normalizedUsername,
             isPremium: userStatus.isPremium || false,
           };
           console.log(
